@@ -536,3 +536,31 @@ Be conversational, helpful, and show your mathematical work clearly to build tru
             })
         
         return history
+    
+    def cleanup(self):
+        """Clean up assistant and thread resources to prevent leaks"""
+        print("🧹 Cleaning up assistant resources...")
+        
+        try:
+            # Clean up thread
+            if self.thread:
+                # Note: OpenAI doesn't currently provide thread deletion API
+                # Threads are automatically cleaned up by OpenAI
+                print(f"✅ Thread {self.thread.id} will be automatically cleaned up by OpenAI")
+                self.thread = None
+            
+            # Clean up assistant
+            if self.assistant:
+                self.client.beta.assistants.delete(self.assistant.id)
+                print(f"✅ Deleted assistant {self.assistant.id}")
+                self.assistant = None
+                
+        except Exception as e:
+            print(f"⚠️ Error during cleanup: {e}")
+    
+    def __del__(self):
+        """Cleanup when assistant manager is destroyed"""
+        try:
+            self.cleanup()
+        except:
+            pass  # Ignore errors during destruction
