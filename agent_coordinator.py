@@ -258,6 +258,9 @@ You have access to a special function 'request_handoff' to transfer conversation
             "timestamp": time.time()
         })
         
+        # Include conversation history in context
+        self.conversation_context["conversation_history"] = self.conversation_history.copy()
+        
         # If we're currently with a specialized agent, try them first
         if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
             current_agent = self.agents[self.current_agent]
@@ -308,12 +311,15 @@ You have access to a special function 'request_handoff' to transfer conversation
             self._ensure_coordinator_thread_ready()
             print(f"✅ Coordinator thread ready")
             
+            # Create a summary of conversation history for the coordinator
+            history_summary = self._create_history_summary()
+            
             # Add user message to coordinator thread
             print(f"📝 Adding message to coordinator thread...")
             self.client.beta.threads.messages.create(
                 thread_id=self.coordinator_thread.id,
                 role="user",
-                content=f"User request: {user_message}\n\nCurrent context: {json.dumps(self.conversation_context)}"
+                content=f"User request: {user_message}\n\nCurrent context: {json.dumps(self.conversation_context)}\n\nConversation history:\n{history_summary}"
             )
             print(f"✅ Message added to coordinator thread")
             
@@ -385,9 +391,12 @@ You have access to a special function 'request_handoff' to transfer conversation
                 print(f"🔄 Handoff requested: {agent_type_str} - {reason}")
                 print(f"📋 Context summary: {context_summary}")
                 
-                # Update context
+                # Update context with handoff info and ensure history is included
                 self.conversation_context["handoff_reason"] = reason
                 self.conversation_context["context_summary"] = context_summary
+                self.conversation_context["conversation_history"] = self.conversation_history.copy()
+                self.conversation_context["previous_agent"] = self.current_agent.value
+                
                 # Perform handoff
                 target_agent_type = AgentType(agent_type_str)
                 if target_agent_type in self.agents:
@@ -497,7 +506,17 @@ You have access to a special function 'request_handoff' to transfer conversation
             
             if handoff.to_agent in self.agents:
                 self.current_agent = handoff.to_agent
+                # Merge handoff context with existing context, ensuring history is preserved
                 self.conversation_context.update(handoff.context)
+                self.conversation_context["conversation_history"] = self.conversation_history.copy()
+                self.conversation_context["handoff_chain"] = self.conversation_context.get("handoff_chain", []) + [
+                    {
+                        "from": handoff.from_agent.value,
+                        "to": handoff.to_agent.value,
+                        "reason": handoff.reason,
+                        "timestamp": time.time()
+                    }
+                ]
                 
                 # Process with new agent
                 new_response = self.agents[handoff.to_agent].process_message(
@@ -516,13 +535,29 @@ You have access to a special function 'request_handoff' to transfer conversation
         
         return response.message
     
+    def _create_history_summary(self) -> str:
+        """Create a formatted summary of conversation history"""
+        if not self.conversation_history:
+            return "No previous conversation history."
+        
+        summary_lines = []
+        for entry in self.conversation_history[-10:]:  # Last 10 messages for context
+            if entry["role"] == "user":
+                summary_lines.append(f"User: {entry['content']}")
+            else:
+                agent_name = entry.get("agent", "Unknown")
+                summary_lines.append(f"{agent_name}: {entry['content']}")
+        
+        return "\n".join(summary_lines)
+    
     def get_conversation_summary(self) -> Dict[str, Any]:
         """Get summary of conversation state"""
         return {
             "current_agent": self.current_agent.value,
             "context": self.conversation_context,
             "history_length": len(self.conversation_history),
-            "available_agents": [agent.value for agent in self.agents.keys()]
+            "available_agents": [agent.value for agent in self.agents.keys()],
+            "recent_history": self.conversation_history[-5:] if self.conversation_history else []
         }
     
     def cleanup_assistants(self):

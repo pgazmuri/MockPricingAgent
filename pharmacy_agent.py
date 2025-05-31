@@ -202,11 +202,10 @@ Always be helpful and provide accurate pharmacy information.
                         agent_type_str = function_args["agent_type"]
                         reason = function_args["reason"]
                         context_summary = function_args["context_summary"]
-                        
                         handoff_request = HandoffRequest(
                             from_agent=AgentType.PHARMACY,
                             to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary, "original_context": context},
+                            context={"summary": context_summary},
                             reason=reason,
                             user_message=message
                         )

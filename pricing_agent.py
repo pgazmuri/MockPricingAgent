@@ -341,11 +341,10 @@ Always show your mathematical work clearly using the calculation functions.
                         agent_type_str = function_args["agent_type"]
                         reason = function_args["reason"]
                         context_summary = function_args["context_summary"]
-                        
                         handoff_request = HandoffRequest(
                             from_agent=AgentType.PRICING,
                             to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary, "original_context": context},
+                            context={"summary": context_summary},
                             reason=reason,
                             user_message=message
                         )
