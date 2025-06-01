@@ -148,7 +148,7 @@ You have access to a special function 'request_handoff' to transfer conversation
         self.coordinator_assistant = self.client.beta.assistants.create(
             name="Healthcare Coordinator",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             tools=[
                 {
                     "type": "function",
@@ -217,6 +217,20 @@ You have access to a special function 'request_handoff' to transfer conversation
                 print(f"❌ Error retrieving coordinator run status: {e}")
                 break
         
+        # CHECK FOR TIMEOUT
+        if retries >= max_retries and run.status in ['queued', 'in_progress', 'requires_action']:
+            print(f"⏰ TIMEOUT: Coordinator run {run.id} did not complete in {max_retries * 0.2}s")
+            print(f"📊 Final status: {run.status}")
+            # Optionally cancel the run
+            try:
+                self.client.beta.threads.runs.cancel(
+                    thread_id=thread_id,
+                    run_id=run.id
+                )
+                print(f"🛑 Cancelled timed-out run {run.id}")
+            except Exception as e:
+                print(f"⚠️ Could not cancel run: {e}")
+        
         if run.status in ['failed', 'cancelled', 'expired']:
             print(f"❌ Coordinator run failed with status: {run.status}")
             if hasattr(run, 'last_error') and run.last_error:
@@ -234,9 +248,9 @@ You have access to a special function 'request_handoff' to transfer conversation
         print(f"🎛️ Current agent: {self.current_agent.value}")
         
         # Comprehensive diagnostic information
-        print(f"🔍 === SYSTEM STATE DIAGNOSTICS ===")
-        print(f"🏠 Coordinator thread ID: {self.coordinator_thread.id if self.coordinator_thread else 'None'}")
-        print(f"🎛️ Coordinator run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
+        # print(f"🔍 === SYSTEM STATE DIAGNOSTICS ===")
+        # print(f"🏠 Coordinator thread ID: {self.coordinator_thread.id if self.coordinator_thread else 'None'}")
+        # print(f"🎛️ Coordinator run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
         
         # Check coordinator thread for active runs
         if self.coordinator_thread:
@@ -264,10 +278,10 @@ You have access to a special function 'request_handoff' to transfer conversation
         # If we're currently with a specialized agent, try them first
         if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
             current_agent = self.agents[self.current_agent]
-            print(f"🔍 Checking if {self.current_agent.value} agent can handle message...")
+            # print(f"🔍 Checking if {self.current_agent.value} agent can handle message...")
             print(f"📍 Current agent: {current_agent.agent_type}")
-            print(f"🧵 Agent thread ID: {current_agent.thread.id if current_agent.thread else 'None'}")
-            print(f"🏃 Agent run: {current_agent.current_run.id if current_agent.current_run else 'None'}")
+            # print(f"🧵 Agent thread ID: {current_agent.thread.id if current_agent.thread else 'None'}")
+            # print(f"🏃 Agent run: {current_agent.current_run.id if current_agent.current_run else 'None'}")
             
            
             print(f"🎯 Continuing conversation with {self.current_agent.value} agent...")
@@ -301,9 +315,9 @@ You have access to a special function 'request_handoff' to transfer conversation
     def _coordinate_request(self, user_message: str) -> str:
         """Use coordinator to determine which agent should handle the request"""
         print(f"🎛️ Coordinator analyzing request...")
-        print(f"🔍 === COORDINATOR DIAGNOSTICS ===")
-        print(f"🏠 Thread ID: {self.coordinator_thread.id}")
-        print(f"🎛️ Current run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
+        # print(f"🔍 === COORDINATOR DIAGNOSTICS ===")
+        # print(f"🏠 Thread ID: {self.coordinator_thread.id}")
+        # print(f"🎛️ Current run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
         
         try:
             # Ensure coordinator thread is ready for new messages
@@ -373,8 +387,8 @@ You have access to a special function 'request_handoff' to transfer conversation
     def _handle_coordinator_actions(self, run, user_message: str) -> str:
         """Handle coordinator function calls (handoffs)"""
         print(f"🔄 === HANDOFF PROCESSING ===")
-        print(f"🎛️ Coordinator run: {run.id}")
-        print(f"🏠 Coordinator thread: {self.coordinator_thread.id}")
+        # print(f"🎛️ Coordinator run: {run.id}")
+        # print(f"🏠 Coordinator thread: {self.coordinator_thread.id}")
         
         tool_calls = run.required_action.submit_tool_outputs.tool_calls
         tool_outputs = []

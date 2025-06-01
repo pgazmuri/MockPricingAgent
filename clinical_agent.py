@@ -188,7 +188,7 @@ Always prioritize patient safety and evidence-based recommendations.
         self.assistant = self.client.beta.assistants.create(
             name="Clinical Pharmacist Specialist",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             tools=tools
         )
         

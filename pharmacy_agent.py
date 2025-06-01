@@ -154,7 +154,7 @@ Always be helpful and provide accurate pharmacy information.
         self.assistant = self.client.beta.assistants.create(
             name="Pharmacy Services Specialist",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             tools=tools
         )
         self.thread = self.client.beta.threads.create()

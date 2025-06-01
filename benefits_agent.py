@@ -173,7 +173,7 @@ Always explain benefits clearly and help members understand their coverage.
         self.assistant = self.client.beta.assistants.create(
             name="Benefits Coverage Specialist",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             tools=tools
         )
         

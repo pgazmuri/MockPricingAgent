@@ -120,7 +120,7 @@ Be security-conscious but user-friendly. Explain each step clearly.
         self.assistant = self.client.beta.assistants.create(
             name="Authentication Specialist",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             tools=tools
         )
         

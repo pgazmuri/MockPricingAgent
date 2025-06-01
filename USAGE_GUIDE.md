@@ -202,7 +202,7 @@ User: "I was just prescribed warfarin, I take aspirin daily"
 - Customize context sharing between agents
 
 ### **Performance Optimization:**
-- Model selection (`gpt-4o-mini` vs `gpt-4-1106-preview`)
+- Model selection (`gpt-4.1-mini` vs `gpt-4-1106-preview`)
 - Polling intervals (currently 0.5s)
 - Function call batching
 
