@@ -7,9 +7,10 @@ Can hand off to other agents when needed (e.g., pricing, authentication, clinica
 
 import json
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
 from openai import OpenAI
+from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 
 class PharmacyAgent(BaseAgent):
@@ -17,42 +18,35 @@ class PharmacyAgent(BaseAgent):
     
     def __init__(self, client: OpenAI):
         super().__init__(client, AgentType.PHARMACY)
-        self.create_assistant()
+        
+        # Set agent-specific properties
+        self.agent_name = "Pharmacy"
+        self.agent_emoji = "🏥"
+          # Initialize agent configuration
+        self.system_prompt = self.get_system_prompt()
+        self.tools = self.get_tools()
     
-    def create_assistant(self):
-        """Create the pharmacy specialist assistant"""
-        instructions = """
+    def get_system_prompt(self) -> str:
+        """Get the system prompt for the pharmacy agent"""
+        base_prompt = """
 You are a specialized pharmacy services expert for a healthcare system.
 Your expertise is in prescription management, refills, transfers, and pharmacy operations.
-
-CAPABILITIES:
-- Prescription status checking
-- Refill management and scheduling  
-- Prescription transfers between pharmacies
-- Pickup notifications and reminders
-- Pharmacy location services
-- Prescription history
-- Medication synchronization
-
-MEMBER INFO: For demos, use member ID "DEMO123456" with DOB "1985-03-15"
-
-HANDOFF SCENARIOS:
-- If user needs authentication/login → hand off to AUTHENTICATION agent
-- If user asks about drug costs/pricing → hand off to PRICING agent  
-- If user needs plan coverage details → hand off to BENEFITS agent
-- If user asks about drug interactions/alternatives → hand off to CLINICAL agent
-
-WORKFLOW:
-1. Check prescription status or refill needs
-2. Verify member identity if needed
-3. Process pharmacy requests (refills, transfers, etc.)
-4. Provide clear status updates and next steps
-
-Use the 'request_handoff' function when user needs services outside your expertise.
-Always be helpful and provide accurate pharmacy information.
+Provide clear and concise information on prescription status, refill scheduling, transfers, and pickup details.
+Use the 'request_handoff' function only when your expertise domain is exceeded.
 """
-        
-        tools = [
+        context_awareness = get_shared_context_awareness()
+        handoff_rules = get_shared_handoff_rules(AgentType.PHARMACY)
+        clarification_rules = """
+CLARIFICATION RULES:
+- After providing prescription status or refill details, answer follow-up questions directly.
+- If the user asks 'When will my refill be ready?' or 'Can I pick up tomorrow?', answer from the context you have.
+- Only hand off pricing queries to Pricing, coverage queries to Benefits, clinical queries to Clinical, and authentication to Authentication.
+"""
+        return base_prompt + context_awareness + handoff_rules + clarification_rules
+    
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get the tools for the pharmacy agent"""
+        return [
             {
                 "type": "function",
                 "function": {
@@ -150,118 +144,9 @@ Always be helpful and provide accurate pharmacy information.
                     }
                 }
             }
-        ]
-        self.assistant = self.client.beta.assistants.create(
-            name="Pharmacy Services Specialist",
-            instructions=instructions,
-            model="gpt-4.1-mini",
-            tools=tools
-        )
-        self.thread = self.client.beta.threads.create()
-    
-    def process_message(self, message: str, context: Dict[str, Any] = None) -> AgentResponse:
-        """Process message and return response with potential handoff"""
-        print(f"🏥 Pharmacy Agent processing: {message}")
-        
-        try:
-            # Ensure thread is ready for new messages
-            self._ensure_thread_ready()
-            
-            # Add user message to thread
-            self.client.beta.threads.messages.create(
-                thread_id=self.thread.id,
-                role="user",
-                content=f"{message}\n\nContext: {json.dumps(context or {})}"
-            )
-            
-            # Run assistant
-            run = self.client.beta.threads.runs.create(
-                thread_id=self.thread.id,
-                assistant_id=self.assistant.id
-            )
-            
-            # Track current run
-            self.current_run = run
-            
-            handoff_request = None
-            
-            # Handle function calls
-            run = self._wait_for_run_completion(run, self.thread.id)
-            
-            while run.status == 'requires_action':
-                tool_calls = run.required_action.submit_tool_outputs.tool_calls
-                tool_outputs = []
-                
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-                    print(f"🔧 Pharmacy Agent calling: {function_name} with {function_args}")
-                    
-                    if function_name == "request_handoff":
-                        # Handle handoff request
-                        agent_type_str = function_args["agent_type"]
-                        reason = function_args["reason"]
-                        context_summary = function_args["context_summary"]
-                        handoff_request = HandoffRequest(
-                            from_agent=AgentType.PHARMACY,
-                            to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary},
-                            reason=reason,
-                            user_message=message
-                        )
-                        
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps({"status": "handoff_requested"})
-                        })
-                        
-                    else:
-                        # Handle regular function calls
-                        output = self._handle_function_call(function_name, function_args)
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": output
-                        })
-                  # Submit tool outputs
-                run = self.client.beta.threads.runs.submit_tool_outputs(
-                    thread_id=self.thread.id,
-                    run_id=run.id,
-                    tool_outputs=tool_outputs
-                )
-                
-                # Wait for completion again
-                run = self._wait_for_run_completion(run, self.thread.id)
-            
-            # Get response
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            response_text = messages.data[0].content[0].text.value
-            
-            return AgentResponse(
-                agent_type=AgentType.PHARMACY,
-                message=response_text,
-                handoff_request=handoff_request,
-                completed=False  # Pharmacy agent typically stays active for follow-ups
-            )
-            
-        except Exception as e:
-            print(f"❌ Error in Pharmacy Agent: {e}")
-            return AgentResponse(
-                agent_type=AgentType.PHARMACY,
-                message=f"I'm sorry, I encountered an error processing your request: {str(e)}",
-                handoff_request=None,
-                completed=False
-            )
-        finally:
-            # Clear current run
-            self.current_run = None
-    
-    def _handle_function_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
-        """Handle function calls with mock data"""
+        ]    
+    def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
+        """Handle tool calls with mock data"""
         try:
             if function_name == "check_prescription_status":
                 member_id = function_args.get("member_id", "")

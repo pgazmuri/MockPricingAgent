@@ -3,13 +3,15 @@ Specialized Benefits Agent
 
 Handles plan details, coverage rules, prior authorizations, and benefit questions.
 Can hand off to other agents when needed (e.g., pricing, authentication, clinical).
+Now uses OpenAI Chat Completions API with streaming instead of Assistants API.
 """
 
 import json
 import time
-from typing import Dict, Any, Optional
-from agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
+from typing import Dict, Any, Optional, Iterator, List
+from agent_coordinator import BaseAgent, AgentType
 from openai import OpenAI
+from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 
 class BenefitsAgent(BaseAgent):
@@ -17,43 +19,38 @@ class BenefitsAgent(BaseAgent):
     
     def __init__(self, client: OpenAI):
         super().__init__(client, AgentType.BENEFITS)
-        self.create_assistant()
-    
-    def create_assistant(self):
-        """Create the benefits specialist assistant"""
-        instructions = """
+        
+        # Set agent-specific properties
+        self.agent_name = "Benefits"
+        self.agent_emoji = "📋"
+        
+        # Initialize tools and system prompt
+        self.system_prompt = self.get_system_prompt()
+        self.tools = self.get_tools()
+    def get_system_prompt(self) -> str:
+        """Get the system prompt for the benefits agent"""
+        # Base benefits agent prompt
+        base_prompt = """
 You are a specialized benefits and coverage expert for a healthcare insurance system.
 Your expertise is in plan details, coverage rules, prior authorizations, and benefit explanations.
-
-CAPABILITIES:
-- Plan benefit explanations
-- Coverage determination
-- Prior authorization status and requirements
-- Formulary tier explanations
-- Deductible and out-of-pocket tracking
-- Plan comparisons
-- Benefits utilization analysis
-- Step therapy requirements
-
-MEMBER INFO: For demos, use member ID "DEMO123456" with DOB "1985-03-15"
-
-HANDOFF SCENARIOS:
-- If user needs authentication/login → hand off to AUTHENTICATION agent
-- If user asks about drug costs/pricing calculations → hand off to PRICING agent  
-- If user needs prescription management → hand off to PHARMACY agent
-- If user asks about drug interactions/alternatives → hand off to CLINICAL agent
-
-WORKFLOW:
-1. Identify the member's plan and benefits
-2. Explain coverage rules and requirements
-3. Guide through prior authorization if needed
-4. Provide clear benefit explanations
-
-Use the 'request_handoff' function when user needs services outside your expertise.
-Always explain benefits clearly and help members understand their coverage.
+Answer benefit questions clearly and concisely.
+Use the 'request_handoff' function only when truly outside your expertise.
 """
+        # Shared context awareness and handoff rules
+        context_awareness = get_shared_context_awareness()
+        handoff_rules = get_shared_handoff_rules(AgentType.BENEFITS)
+        # Benefits-specific clarification rules
+        clarification_rules = """
+CLARIFICATION RULES:
+- If receiving a handoff from Pricing agent about specific dollar amounts, answer directly using provided pricing context.
+- Questions about "how much I pay", copay, deductible status, or out-of-pocket are your domain; do not hand off.
+- Only hand off specific pricing calculations you cannot derive from given context.
+"""
+        return base_prompt + context_awareness + handoff_rules + clarification_rules
         
-        tools = [
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get the tools configuration for the benefits agent"""
+        return [
             {
                 "type": "function",
                 "function": {
@@ -170,117 +167,9 @@ Always explain benefits clearly and help members understand their coverage.
                 }
             }
         ]
-        self.assistant = self.client.beta.assistants.create(
-            name="Benefits Coverage Specialist",
-            instructions=instructions,
-            model="gpt-4.1-mini",
-            tools=tools
-        )
-        
-        self.thread = self.client.beta.threads.create()
-    def process_message(self, message: str, context: Dict[str, Any] = None) -> AgentResponse:
-        """Process message and return response with potential handoff"""
-        print(f"📋 Benefits Agent processing: {message}")
-        
-        try:
-            # Ensure thread is ready for new messages
-            self._ensure_thread_ready()
-            
-            # Add user message to thread
-            self.client.beta.threads.messages.create(
-                thread_id=self.thread.id,
-                role="user",
-                content=f"{message}\n\nContext: {json.dumps(context or {})}"
-            )
-            
-            # Run assistant
-            run = self.client.beta.threads.runs.create(
-                thread_id=self.thread.id,
-                assistant_id=self.assistant.id
-            )
-            
-            # Track current run
-            self.current_run = run
-            
-            handoff_request = None
-            
-            # Handle function calls
-            run = self._wait_for_run_completion(run, self.thread.id)
-            
-            while run.status == 'requires_action':
-                tool_calls = run.required_action.submit_tool_outputs.tool_calls
-                tool_outputs = []
-                
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-                    print(f"🔧 Benefits Agent calling: {function_name} with {function_args}")
-                    
-                    if function_name == "request_handoff":
-                        # Handle handoff request
-                        agent_type_str = function_args["agent_type"]
-                        reason = function_args["reason"]
-                        context_summary = function_args["context_summary"]
-                        handoff_request = HandoffRequest(
-                            from_agent=AgentType.BENEFITS,
-                            to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary},
-                            reason=reason,
-                            user_message=message
-                        )
-                        
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps({"status": "handoff_requested"})
-                        })
-                        
-                    else:
-                        # Handle regular function calls
-                        output = self._handle_function_call(function_name, function_args)
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": output
-                        })
-                  # Submit tool outputs
-                run = self.client.beta.threads.runs.submit_tool_outputs(
-                    thread_id=self.thread.id,
-                    run_id=run.id,
-                    tool_outputs=tool_outputs
-                )
-                
-                # Wait for completion again
-                run = self._wait_for_run_completion(run, self.thread.id)
-            
-            # Get response
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            response_text = messages.data[0].content[0].text.value
-            
-            return AgentResponse(
-                agent_type=AgentType.BENEFITS,
-                message=response_text,
-                handoff_request=handoff_request,
-                completed=False  # Benefits agent typically stays active for follow-ups
-            )
-            
-        except Exception as e:
-            print(f"❌ Error in Benefits Agent: {e}")
-            return AgentResponse(
-                agent_type=AgentType.BENEFITS,
-                message=f"I'm sorry, I encountered an error processing your request: {str(e)}",
-                handoff_request=None,
-                completed=False
-            )
-        finally:
-            # Clear current run
-            self.current_run = None
     
-    def _handle_function_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
-        """Handle function calls with mock data"""
+    def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
+        """Handle tool calls with mock data"""
         try:
             if function_name == "get_plan_details":
                 member_id = function_args.get("member_id", "")

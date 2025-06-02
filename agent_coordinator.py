@@ -3,11 +3,13 @@ Multi-Agent Coordinator
 
 This module manages multiple specialized agents and handles conversation handoffs
 between them based on user intent and conversation context.
+
+Now uses OpenAI Completion API with streaming instead of Assistant API.
 """
 
 import json
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterator, Generator
 from enum import Enum
 from openai import OpenAI
 from dataclasses import dataclass
@@ -41,91 +43,255 @@ class AgentResponse:
     completed: bool = False
 
 class BaseAgent:
-    """Base class for all specialized agents"""
+    """Base class for all specialized agents using Completion API with streaming"""
     
-    def __init__(self, client: OpenAI, agent_type: AgentType):
+    def __init__(self, client: OpenAI, agent_type: AgentType, coordinator=None, model: str = "gpt-4o-mini"):
         self.client = client
         self.agent_type = agent_type
-        self.assistant = None
-        self.thread = None
-        self.current_run = None
-        
-    def create_assistant(self) -> None:
-        """Create the OpenAI assistant - to be implemented by subclasses"""
+        self.coordinator = coordinator  # Reference to coordinator for handoffs
+        self.model = model  # Allow each agent to specify its model
+        self.conversation_history = []
+        self.tools = []
+        self.system_prompt = ""
+          # Agent-specific properties (can be overridden by subclasses)
+        self.agent_name = agent_type.value.title()
+        self.agent_emoji = "🤖"
+    
+    def request_handoff(self, to_agent: AgentType, reason: str, context_summary: str, user_message: str):
+        """Request a handoff to another agent"""
+        if self.coordinator:
+            # Merge local agent conversation history with coordinator history for complete context
+            merged_history = self.coordinator.conversation_history.copy()
+            
+            # Add ALL messages from this agent's conversation history that aren't already in coordinator history
+            for msg in self.conversation_history:
+                if msg not in merged_history:
+                    # Include all message types: user, assistant, tool, etc.
+                    merged_history.append(msg)
+            
+            # Include full conversation history and current context in handoff
+            handoff_context = {
+                "summary": context_summary,
+                "conversation_history": merged_history,
+                "previous_agent": self.agent_type.value,
+                "handoff_reason": reason
+            }
+            
+            handoff_request = HandoffRequest(
+                from_agent=self.agent_type,
+                to_agent=to_agent,
+                context=handoff_context,
+                reason=reason,
+                user_message=user_message
+            )
+            self.coordinator.pending_handoff = handoff_request
+            print(f"🔄 {self.agent_type.value} agent requesting handoff to {to_agent.value}: {reason}")
+    
+    
+    def create_agent(self) -> None:
+        """Create the agent configuration - to be implemented by subclasses"""
         raise NotImplementedError
     
-    def process_message(self, message: str, context: Dict[str, Any] = None) -> AgentResponse:
-        """Process a message and return response with potential handoff"""
-        raise NotImplementedError
-    
-    def _wait_for_run_completion(self, run, thread_id: str):
-        """Wait for a run to complete and handle any errors"""
-        max_retries = 30  # 30 * 0.2s = 6 seconds max wait
-        retries = 0
-        
-        while run.status in ['queued', 'in_progress', 'requires_action'] and retries < max_retries:
-            time.sleep(0.2)
-            retries += 1
-            try:
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=thread_id,
-                    run_id=run.id
+    def process_message(self, message: str, context: Dict[str, Any] = None) -> Iterator[str]:
+        """Process a message and return streaming response with potential handoff, using a tool-call loop with 5-iteration failsafe."""
+        agent_name = getattr(self, 'agent_name', self.agent_type.value.title())
+        print(f"{getattr(self, 'agent_emoji', '🤖')} {agent_name} Agent processing: {message}")
+        try:
+            # Add user message to conversation history FIRST
+            self.conversation_history.append({"role": "user", "content": message})
+            # Build initial messages for completion
+            messages = self._build_messages(message, context)
+            tools = self.tools            
+            for loop_count in range(5):
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=0.7
                 )
-            except Exception as e:
-                print(f"❌ Error retrieving run status: {e}")
-                break
-        
-        if run.status in ['failed', 'cancelled', 'expired']:
-            print(f"❌ Run failed with status: {run.status}")
-            if hasattr(run, 'last_error') and run.last_error:
-                print(f"❌ Error details: {run.last_error}")
-        
-        return run
+                msg = response.choices[0].message                # If tool calls, handle them
+                if msg.tool_calls:
+                    # Add assistant message with tool calls to conversation history first
+                    self.conversation_history.append({
+                        "role": "assistant",
+                        "content": msg.content,
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.function.name,
+                                    "arguments": call.function.arguments
+                                }
+                            } for call in msg.tool_calls
+                        ]
+                    })
+                    
+                    for call in msg.tool_calls:
+                        fn_name = call.function.name
+                        fn_args = json.loads(call.function.arguments)
+                        print(f"🔧 {agent_name} Agent calling: {fn_name} with {fn_args}")                        
+                        if fn_name == "request_handoff":
+                            agent_type_str = fn_args["agent_type"]
+                            reason = fn_args["reason"]
+                            context_summary = fn_args["context_summary"]
+                            
+                            # Add tool result to conversation history for handoff context
+                            self.conversation_history.append({
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": json.dumps({"handoff_requested": True, "reason": reason})
+                            })
+                            
+                            self.request_handoff(
+                                to_agent=AgentType(agent_type_str),
+                                reason=reason,
+                                context_summary=context_summary,
+                                user_message=message
+                            )
+                            # Handoff happens silently - no message yielded, break from loop
+                            return
+                        else:
+                            if hasattr(self, 'handle_tool_call'):
+                                result = self.handle_tool_call(fn_name, fn_args)
+                            else:
+                                result = json.dumps({"error": f"No handler for function {fn_name}"})
+                            # 3️⃣ feed the result back
+                            messages.append({
+                                "role": "assistant",
+                                "content": msg.content,
+                                "tool_calls": [
+                                    {
+                                        "id": call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": fn_name,
+                                            "arguments": call.function.arguments
+                                        }
+                                    }
+                                ]
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": result
+                            })
+                    continue  # ask the model again
+                else:
+                    # No tool calls, yield the final answer
+                    if msg.content:
+                        self.conversation_history.append({"role": "assistant", "content": msg.content})
+                        for word in msg.content.split():
+                            yield word + " "
+                        break
+            else:
+                # Failsafe: too many tool call loops
+                yield "I'm sorry, I wasn't able to complete your request after several attempts. Please try again or rephrase."
+        except Exception as e:
+            print(f"❌ Error in {agent_name} Agent: {e}")
+            yield f"I'm sorry, I encountered an error processing your request: {str(e)}"
     
-    def _ensure_thread_ready(self):
-        """Ensure the thread is ready for new messages"""
-        if self.current_run:
-            try:
-                # Check if there's an active run
-                run_status = self.client.beta.threads.runs.retrieve(
-                    thread_id=self.thread.id,
-                    run_id=self.current_run.id
-                )
-                
-                if run_status.status in ['queued', 'in_progress', 'requires_action']:
-                    print(f"⏳ Waiting for previous run to complete...")
-                    self._wait_for_run_completion(run_status, self.thread.id)
-                
-            except Exception as e:
-                print(f"⚠️ Error checking run status: {e}")
-            finally:
-                self.current_run = None
+    def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
+        """Handle tool calls - to be implemented by subclasses"""
+        raise NotImplementedError(f"Agent must implement handle_tool_call for function: {function_name}")
+    def _build_messages(self, message: str, context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Build messages array for completion API"""
+        messages = [{"role": "system", "content": self.system_prompt}]
+          # Use conversation history from context (for handoffs) or local history
+        conversation_history = []
+        if context and "conversation_history" in context:
+            # Use coordinator's conversation history for handoffs
+            conversation_history = context["conversation_history"]  # Keep full conversation history
+        else:
+            # Use agent's local conversation history
+            conversation_history = self.conversation_history  # Keep full conversation history
+          # Add conversation history to messages
+        for msg in conversation_history:
+            if isinstance(msg, dict) and "role" in msg:
+                # Handle different message types properly
+                if msg["role"] == "assistant" and "tool_calls" in msg:
+                    # Assistant message with tool calls
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg.get("content"),
+                        "tool_calls": msg["tool_calls"]
+                    })
+                elif msg["role"] == "tool":
+                    # Tool result message
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": msg.get("tool_call_id"),
+                        "content": msg.get("content", "")
+                    })
+                elif "content" in msg:
+                    # Regular user/assistant message
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                # Skip messages without content or tool_calls (invalid messages)
+            
+        # Add handoff context if provided, including original request summary and reason
+        if context:
+            context_summary_parts = []
+            # pick up summary under either key
+            if "summary" in context:
+                context_summary_parts.append(f"Original context summary: {context['summary']}")
+            elif "context_summary" in context:
+                context_summary_parts.append(f"Original context summary: {context['context_summary']}")
+            # include explicit reason and previous agent
+            if "handoff_reason" in context:
+                context_summary_parts.append(f"Handoff reason: {context['handoff_reason']}")
+            if "previous_agent" in context:
+                context_summary_parts.append(f"Previous agent: {context['previous_agent']}")
+            if context_summary_parts:
+                context_msg = "\n".join(context_summary_parts)
+                # insert immediately after system prompt for clarity
+                messages.insert(1, {"role": "system", "content": context_msg})
+        
+        # Add current user message
+        messages.append({"role": "user", "content": message})
+        
+        return messages
+    
+    def _stream_completion(self, messages: List[Dict[str, Any]]) -> Iterator[str]:
+        """Stream completion from OpenAI"""
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=self.tools if self.tools else None,
+                tool_choice="auto" if self.tools else None,
+                stream=True,
+                temperature=0.7
+            )
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            print(f"❌ Error in streaming completion: {e}")
+            yield f"I'm sorry, I encountered an error: {str(e)}"
 
 class MultiAgentCoordinator:
-    """Coordinates multiple agents and manages handoffs"""
-    def __init__(self):
+    """Coordinates multiple agents and manages handoffs using streaming completion API"""
+    
+    def __init__(self, coordinator_model: str = "gpt-4o-mini"):
         self.client = OpenAI(api_key=keys.OPENAI_API_KEY)
+        self.coordinator_model = coordinator_model  # Allow specifying coordinator model
         self.agents: Dict[AgentType, BaseAgent] = {}
         self.conversation_context = {}
         self.current_agent = AgentType.COORDINATOR
         self.conversation_history = []
-        
-        # Initialize coordinator assistant
-        self.coordinator_assistant = None
-        self.coordinator_thread = None
-        self.coordinator_current_run = None  # Track coordinator's current run
-        self._create_coordinator()
-        
-    def _create_coordinator(self):
-        """Create the main coordinator assistant"""
-        instructions = """
+        self.pending_handoff: Optional[HandoffRequest] = None
+        self.coordinator_tools = self._create_coordinator_tools()
+        self.coordinator_system_prompt = self._create_coordinator_system_prompt()
+    def _create_coordinator_system_prompt(self) -> str:
+        """Create the coordinator system prompt"""
+        return """
 You are a smart coordinator for a healthcare/pharmacy system with multiple specialized agents.
 
-Your job is to:
-1. Understand user intent and determine which specialized agent should handle the request
-2. Collect any missing information needed for handoffs
-3. Provide smooth transitions between agents
-4. Maintain conversation context
+Your ONLY job is to understand user intent and immediately hand off to the appropriate specialist. 
+DO NOT respond to the user directly - ALWAYS use the request_handoff function immediately.
 
 AVAILABLE AGENTS:
 - PRICING: Drug cost calculations, insurance benefits, pricing estimates
@@ -135,135 +301,58 @@ AVAILABLE AGENTS:
 - CLINICAL: Drug interactions, alternatives, clinical criteria
 
 HANDOFF RULES:
-- Start with AUTHENTICATION if user needs member-specific services
-- Use PRICING for cost/pricing questions
-- Use PHARMACY for prescription management
-- Use BENEFITS for plan/coverage questions
-- Use CLINICAL for medical/drug interaction questions
+- For prescription refills, status, transfers, pickup → hand off to PHARMACY
+- For authentication, login, verification → hand off to AUTHENTICATION  
+- For drug costs, pricing, insurance → hand off to PRICING
+- For plan details, coverage → hand off to BENEFITS
+- For drug interactions, alternatives → hand off to CLINICAL
 
-Always be friendly and explain transitions: "Let me connect you with our pricing specialist..."
-
-You have access to a special function 'request_handoff' to transfer conversations.
+IMPORTANT: Never respond to the user directly. Always use request_handoff function immediately to transfer to the appropriate agent. The specialist will handle the actual response.
 """
-        self.coordinator_assistant = self.client.beta.assistants.create(
-            name="Healthcare Coordinator",
-            instructions=instructions,
-            model="gpt-4.1-mini",
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "request_handoff",
-                        "description": "Hand off conversation to a specialized agent",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "agent_type": {
-                                    "type": "string",
-                                    "enum": ["pricing", "authentication", "pharmacy", "benefits", "clinical"],
-                                    "description": "Which agent to hand off to"
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": "Why this handoff is needed"
-                                },
-                                "context_summary": {
-                                    "type": "string",
-                                    "description": "Summary of conversation context for the receiving agent"
-                                }
+    
+    def _create_coordinator_tools(self) -> List[Dict[str, Any]]:
+        """Create coordinator tools for handoffs"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "request_handoff",
+                    "description": "Hand off conversation to a specialized agent",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_type": {
+                                "type": "string",
+                                "enum": ["pricing", "authentication", "pharmacy", "benefits", "clinical"],
+                                "description": "Which agent to hand off to"
                             },
-                            "required": ["agent_type", "reason", "context_summary"]
-                        }
+                            "reason": {
+                                "type": "string",
+                                "description": "Why this handoff is needed"
+                            },
+                            "context_summary": {
+                                "type": "string",
+                                "description": "Summary of conversation context for the receiving agent"
+                            }
+                        },
+                        "required": ["agent_type", "reason", "context_summary"]
                     }
                 }
-            ]
-        )
-        
-        self.coordinator_thread = self.client.beta.threads.create()
-    def _ensure_coordinator_thread_ready(self):
-        """Ensure the coordinator thread is ready for new messages"""
-        if self.coordinator_current_run:
-            try:
-                # Check if there's an active run
-                run_status = self.client.beta.threads.runs.retrieve(
-                    thread_id=self.coordinator_thread.id,
-                    run_id=self.coordinator_current_run.id
-                )
-                
-                if run_status.status in ['queued', 'in_progress', 'requires_action']:
-                    print(f"⏳ Waiting for previous coordinator run to complete...")
-                    # Use the same wait pattern as BaseAgent
-                    self._wait_for_coordinator_run_completion(run_status, self.coordinator_thread.id)
-                
-            except Exception as e:
-                print(f"⚠️ Error checking coordinator run status: {e}")
-            finally:
-                self.coordinator_current_run = None
-    
-    def _wait_for_coordinator_run_completion(self, run, thread_id: str):
-        """Wait for a coordinator run to complete and handle any errors"""
-        max_retries = 30  # 30 * 0.2s = 6 seconds max wait
-        retries = 0
-        
-        while run.status in ['queued', 'in_progress', 'requires_action'] and retries < max_retries:
-            time.sleep(0.2)
-            retries += 1
-            try:
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=thread_id,
-                    run_id=run.id
-                )
-            except Exception as e:
-                print(f"❌ Error retrieving coordinator run status: {e}")
-                break
-        
-        # CHECK FOR TIMEOUT
-        if retries >= max_retries and run.status in ['queued', 'in_progress', 'requires_action']:
-            print(f"⏰ TIMEOUT: Coordinator run {run.id} did not complete in {max_retries * 0.2}s")
-            print(f"📊 Final status: {run.status}")
-            # Optionally cancel the run
-            try:
-                self.client.beta.threads.runs.cancel(
-                    thread_id=thread_id,
-                    run_id=run.id
-                )
-                print(f"🛑 Cancelled timed-out run {run.id}")
-            except Exception as e:
-                print(f"⚠️ Could not cancel run: {e}")
-        
-        if run.status in ['failed', 'cancelled', 'expired']:
-            print(f"❌ Coordinator run failed with status: {run.status}")
-            if hasattr(run, 'last_error') and run.last_error:
-                print(f"❌ Error details: {run.last_error}")
-        
-        return run
+            }        ]
     
     def register_agent(self, agent: BaseAgent):
         """Register a specialized agent"""
+        agent.coordinator = self  # Give agent reference to coordinator
         self.agents[agent.agent_type] = agent
-        print(f"🤖 Registered {agent.agent_type.value} agent")    
-    def process_message(self, user_message: str) -> str:
-        """Process user message and coordinate between agents"""
+        print(f"🤖 Registered {agent.agent_type.value} agent")
+    
+    def process_message(self, user_message: str) -> Iterator[str]:
+        """Process user message and coordinate between agents with streaming"""
         print(f"\n👤 User: {user_message}")
         print(f"🎛️ Current agent: {self.current_agent.value}")
         
-        # Comprehensive diagnostic information
-        # print(f"🔍 === SYSTEM STATE DIAGNOSTICS ===")
-        # print(f"🏠 Coordinator thread ID: {self.coordinator_thread.id if self.coordinator_thread else 'None'}")
-        # print(f"🎛️ Coordinator run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
-        
-        # Check coordinator thread for active runs
-        if self.coordinator_thread:
-            try:
-                active_runs = self.client.beta.threads.runs.list(
-                    thread_id=self.coordinator_thread.id,
-                    limit=5
-                )
-                print(f"📋 Coordinator active runs:")
-                for run in active_runs.data:
-                    print(f"   - Run {run.id}: {run.status}")
-            except Exception as e:
-                print(f"❌ Error checking coordinator runs: {e}")
+        # Clear any pending handoffs from previous interactions
+        self.pending_handoff = None
         
         # Add to conversation history
         self.conversation_history.append({
@@ -274,234 +363,122 @@ You have access to a special function 'request_handoff' to transfer conversation
         
         # Include conversation history in context
         self.conversation_context["conversation_history"] = self.conversation_history.copy()
-        
-        # If we're currently with a specialized agent, try them first
+          # If we're currently with a specialized agent, try them first
         if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
             current_agent = self.agents[self.current_agent]
-            # print(f"🔍 Checking if {self.current_agent.value} agent can handle message...")
-            print(f"📍 Current agent: {current_agent.agent_type}")
-            # print(f"🧵 Agent thread ID: {current_agent.thread.id if current_agent.thread else 'None'}")
-            # print(f"🏃 Agent run: {current_agent.current_run.id if current_agent.current_run else 'None'}")
-            
-           
             print(f"🎯 Continuing conversation with {self.current_agent.value} agent...")
-                
-            # Check for active runs before processing
-            if hasattr(current_agent, 'current_run') and current_agent.current_run:
-                print(f"⚠️ FOUND ACTIVE RUN in {self.current_agent.value} agent - this could cause the error!")
-                try:
-                    run_status = current_agent.client.beta.threads.runs.retrieve(
-                        thread_id=current_agent.thread.id,
-                        run_id=current_agent.current_run.id
-                    )
-                    print(f"📊 Run status: {run_status.status}")
-                    
-                    # If the run is still active, wait for it to complete
-                    if run_status.status in ['queued', 'in_progress', 'requires_action']:
-                        print(f"⏳ WAITING for active run to complete before processing new message...")
-                        # Call the agent's _ensure_thread_ready method to wait for completion
-                        current_agent._ensure_thread_ready()
-                        print(f"✅ Previous run completed, now processing new message")
-                    
-                except Exception as e:
-                    print(f"❌ Error checking run status: {e}")
-			
-            response = current_agent.process_message(user_message, self.conversation_context)
-            return self._handle_agent_response(response)
-          # Otherwise, use coordinator to determine routing
+            
+            # Collect the agent's response
+            agent_response_parts = []
+            for chunk in current_agent.process_message(user_message, self.conversation_context):
+                agent_response_parts.append(chunk)
+                yield chunk
+            
+            # Add agent's response to coordinator conversation history
+            if agent_response_parts:
+                full_response = "".join(agent_response_parts).strip()
+                if full_response:
+                    self.conversation_history.append({
+                        "role": "assistant",
+                        "agent": self.current_agent.value,
+                        "content": full_response,
+                        "timestamp": time.time()
+                    })
+                  # Check for pending handoffs after streaming is complete
+            if self.pending_handoff:
+                # Process handoffs recursively to handle chained handoffs
+                for chunk in self._process_handoff_chain(user_message):
+                    yield chunk
+            return
+        
+        # Otherwise, use coordinator to determine routing
         print(f"🎛️ Using coordinator to route message...")
-        return self._coordinate_request(user_message)
+        for chunk in self._coordinate_request(user_message):
+            yield chunk
     
-    def _coordinate_request(self, user_message: str) -> str:
+    def _coordinate_request(self, user_message: str) -> Iterator[str]:
         """Use coordinator to determine which agent should handle the request"""
         print(f"🎛️ Coordinator analyzing request...")
-        # print(f"🔍 === COORDINATOR DIAGNOSTICS ===")
-        # print(f"🏠 Thread ID: {self.coordinator_thread.id}")
-        # print(f"🎛️ Current run: {self.coordinator_current_run.id if self.coordinator_current_run else 'None'}")
         
         try:
-            # Ensure coordinator thread is ready for new messages
-            print(f"⏳ Ensuring coordinator thread is ready...")
-            self._ensure_coordinator_thread_ready()
-            print(f"✅ Coordinator thread ready")
-            
             # Create a summary of conversation history for the coordinator
             history_summary = self._create_history_summary()
             
-            # Add user message to coordinator thread
-            print(f"📝 Adding message to coordinator thread...")
-            self.client.beta.threads.messages.create(
-                thread_id=self.coordinator_thread.id,
-                role="user",
-                content=f"User request: {user_message}\n\nCurrent context: {json.dumps(self.conversation_context)}\n\nConversation history:\n{history_summary}"
-            )
-            print(f"✅ Message added to coordinator thread")
-            
-            # Run coordinator
-            print(f"🚀 Creating coordinator run...")
-            run = self.client.beta.threads.runs.create(
-                thread_id=self.coordinator_thread.id,
-                assistant_id=self.coordinator_assistant.id
-            )
-            print(f"✅ Coordinator run created: {run.id}")
-            
-            # Track current run
-            self.coordinator_current_run = run
-            
-            # Wait for completion with proper thread management
-            max_retries = 30  # 30 * 0.2s = 6 seconds max wait
-            retries = 0
-            
-            while run.status in ['queued', 'in_progress', 'requires_action'] and retries < max_retries:
-                time.sleep(0.2)
-                retries += 1
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=self.coordinator_thread.id,
-                    run_id=run.id
+            # Build messages for coordinator
+            messages = [
+                {"role": "system", "content": self.coordinator_system_prompt}
+            ]
+              # Add conversation history context
+            context_message = f"User request: {user_message}\n\nCurrent context: {json.dumps(self.conversation_context)}\n\nConversation history:\n{history_summary}"
+            messages.append({"role": "user", "content": context_message})
+              
+            # Try to get completion with tool calls - coordinator MUST use tools
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.coordinator_model,
+                    messages=messages,
+                    tools=self.coordinator_tools,
+                    tool_choice="required",  # Force tool usage
+                    temperature=0.7
                 )
                 
-                if run.status == 'requires_action':
-                    return self._handle_coordinator_actions(run, user_message)
-            
-            # Check for errors
-            if run.status in ['failed', 'cancelled', 'expired']:
-                print(f"❌ Coordinator run failed: {run.status}")
-                return "I'm sorry, I'm having trouble processing your request right now. Please try again."
-              # Get coordinator response if no handoff
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.coordinator_thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            response_text = messages.data[0].content[0].text.value
-            print(f"🎛️ Coordinator: {response_text}")
-            return response_text
-            
+                # Check if there are tool calls (handoffs)
+                if response.choices[0].message.tool_calls:
+                    for tool_call in response.choices[0].message.tool_calls:
+                        if tool_call.function.name == "request_handoff":
+                            function_args = json.loads(tool_call.function.arguments)
+                            agent_type_str = function_args["agent_type"]
+                            reason = function_args["reason"]
+                            context_summary = function_args["context_summary"]
+                            
+                            print(f"🔄 Handoff requested: {agent_type_str} - {reason}")
+                            
+                            # Update context with handoff info
+                            self.conversation_context["handoff_reason"] = reason
+                            self.conversation_context["context_summary"] = context_summary
+                            self.conversation_context["previous_agent"] = self.current_agent.value                            # Perform handoff
+                            target_agent_type = AgentType(agent_type_str)
+                            if target_agent_type in self.agents:
+                                print(f"🎯 Transferring to {agent_type_str} agent...")
+                                self.current_agent = target_agent_type
+                                target_agent = self.agents[target_agent_type]
+                                
+                                # Collect and stream response from target agent
+                                target_response_parts = []
+                                for chunk in target_agent.process_message(user_message, self.conversation_context):
+                                    target_response_parts.append(chunk)
+                                    yield chunk
+                                
+                                # Add target agent's response to coordinator conversation history
+                                if target_response_parts:
+                                    target_full_response = "".join(target_response_parts).strip()
+                                    if target_full_response:
+                                        self.conversation_history.append({
+                                            "role": "assistant",
+                                            "agent": target_agent_type.value,
+                                            "content": target_full_response,
+                                            "timestamp": time.time()
+                                        })
+                                
+                                # Check for chained handoffs after initial handoff
+                                if self.pending_handoff:
+                                    for chunk in self._process_handoff_chain(user_message):
+                                        yield chunk
+                                return
+                            else:
+                                yield f"I'm sorry, the {agent_type_str} agent is not available right now."
+                                return                
+                # If no tool calls were made (shouldn't happen with tool_choice="required"), 
+                # fallback to a generic response
+                yield "I'm sorry, I couldn't understand your request. Could you please rephrase it?"
+                return
+                        
+            except Exception as e:
+                print(f"❌ Error in coordinator completion: {e}")
+                yield "I'm sorry, I'm having trouble processing your request right now. Please try again."
         except Exception as e:
             print(f"❌ Error in coordinator: {e}")
-            return "I'm sorry, I encountered an error while processing your request. Please try again."
-        finally:
-            # Clear coordinator run tracking
-            self.coordinator_current_run = None
-    def _handle_coordinator_actions(self, run, user_message: str) -> str:
-        """Handle coordinator function calls (handoffs)"""
-        print(f"🔄 === HANDOFF PROCESSING ===")
-        # print(f"🎛️ Coordinator run: {run.id}")
-        # print(f"🏠 Coordinator thread: {self.coordinator_thread.id}")
-        
-        tool_calls = run.required_action.submit_tool_outputs.tool_calls
-        tool_outputs = []
-        
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-            function_args = json.loads(tool_call.function.arguments)
-            
-            if function_name == "request_handoff":
-                agent_type_str = function_args["agent_type"]
-                reason = function_args["reason"]
-                context_summary = function_args["context_summary"]
-                
-                print(f"🔄 Handoff requested: {agent_type_str} - {reason}")
-                print(f"📋 Context summary: {context_summary}")
-                
-                # Update context with handoff info and ensure history is included
-                self.conversation_context["handoff_reason"] = reason
-                self.conversation_context["context_summary"] = context_summary
-                self.conversation_context["conversation_history"] = self.conversation_history.copy()
-                self.conversation_context["previous_agent"] = self.current_agent.value
-                
-                # Perform handoff
-                target_agent_type = AgentType(agent_type_str)
-                if target_agent_type in self.agents:
-                    print(f"🎯 Transferring to {agent_type_str} agent...")
-                    self.current_agent = target_agent_type
-                    target_agent = self.agents[target_agent_type]
-                    
-                    # Add current agent type to conversation context for tracking (not the object itself)
-                    self.conversation_context["current_agent_type"] = agent_type_str
-                    
-                    # Check target agent thread state before processing
-                    print(f"🔍 === TARGET AGENT DIAGNOSTICS ===")
-                    print(f"🎯 Agent: {target_agent.agent_type}")
-                    print(f"🧵 Thread ID: {target_agent.thread.id if target_agent.thread else 'None'}")
-                    print(f"🏃 Current run: {target_agent.current_run.id if target_agent.current_run else 'None'}")
-                    
-                    if target_agent.thread:
-                        try:
-                            active_runs = self.client.beta.threads.runs.list(
-                                thread_id=target_agent.thread.id,
-                                limit=5
-                            )
-                            print(f"📋 Target agent active runs:")
-                            for run_info in active_runs.data:
-                                print(f"   - Run {run_info.id}: {run_info.status}")
-                        except Exception as e:
-                            print(f"❌ Error checking target agent runs: {e}")
-                    
-                    # Process message with target agent
-                    print(f"🚀 Processing message with {agent_type_str} agent...")
-                    response = target_agent.process_message(user_message, self.conversation_context)
-                    result = self._handle_agent_response(response)
-                    
-                    tool_outputs.append({
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps({"status": "handoff_completed", "response": result})
-                    })
-                    
-                    return result
-                else:
-                    error_msg = f"Agent {agent_type_str} not available"
-                    print(f"❌ {error_msg}")
-                    tool_outputs.append({
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps({"error": error_msg})
-                    })
-          # Submit tool outputs and continue
-        try:
-            run = self.client.beta.threads.runs.submit_tool_outputs(
-                thread_id=self.coordinator_thread.id,
-                run_id=run.id,
-                tool_outputs=tool_outputs
-            )
-            
-            # Wait for final response - include requires_action in case of multiple function calls
-            max_retries = 30
-            retries = 0
-            while run.status in ['queued', 'in_progress', 'requires_action'] and retries < max_retries:
-                time.sleep(0.2)
-                retries += 1
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=self.coordinator_thread.id,
-                    run_id=run.id
-                )
-                
-                # Handle additional function calls if needed
-                if run.status == 'requires_action':
-                    print("⚠️ Coordinator needs additional actions - this shouldn't happen in normal handoffs")
-                    break
-            
-            # Check for completion errors
-            if run.status in ['failed', 'cancelled', 'expired']:
-                print(f"❌ Coordinator action run failed: {run.status}")
-                return "I'm sorry, there was an issue completing the handoff. Please try again."
-            
-            if retries >= max_retries:
-                print("❌ Coordinator action run timed out")
-                return "I'm sorry, the request took too long to process. Please try again."
-            
-            # Get final response
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.coordinator_thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            return messages.data[0].content[0].text.value
-            
-        except Exception as e:
-            print(f"❌ Error in coordinator action handling: {e}")
-            return "I'm sorry, I encountered an error while processing your request. Please try again."
+            yield "I'm sorry, I encountered an error while processing your request. Please try again."
     
     def _handle_agent_response(self, response: AgentResponse) -> str:
         """Handle response from a specialized agent"""
@@ -548,14 +525,26 @@ You have access to a special function 'request_handoff' to transfer conversation
             print(f"✅ {response.agent_type.value} agent completed task, returning to coordinator")
         
         return response.message
+
+    def _add_to_conversation_history(self, role: str, content: str, agent_type: str = None):
+        """Add message to conversation history"""
+        entry = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time()
+        }
+        if agent_type:
+            entry["agent"] = agent_type
+        self.conversation_history.append(entry)
+        
+        # Keep all conversation history - no truncation
     
     def _create_history_summary(self) -> str:
         """Create a formatted summary of conversation history"""
         if not self.conversation_history:
             return "No previous conversation history."
-        
         summary_lines = []
-        for entry in self.conversation_history[-10:]:  # Last 10 messages for context
+        for entry in self.conversation_history:  # Keep all conversation history
             if entry["role"] == "user":
                 summary_lines.append(f"User: {entry['content']}")
             else:
@@ -563,7 +552,6 @@ You have access to a special function 'request_handoff' to transfer conversation
                 summary_lines.append(f"{agent_name}: {entry['content']}")
         
         return "\n".join(summary_lines)
-    
     def get_conversation_summary(self) -> Dict[str, Any]:
         """Get summary of conversation state"""
         return {
@@ -574,33 +562,59 @@ You have access to a special function 'request_handoff' to transfer conversation
             "recent_history": self.conversation_history[-5:] if self.conversation_history else []
         }
     
-    def cleanup_assistants(self):
-        """Clean up all assistants at the API level to prevent resource leaks"""
-        print("🧹 Cleaning up assistants...")
-        
-        try:
-            # Clean up coordinator assistant
-            if self.coordinator_assistant:
-                self.client.beta.assistants.delete(self.coordinator_assistant.id)
-                print(f"✅ Deleted coordinator assistant {self.coordinator_assistant.id}")
-                self.coordinator_assistant = None
-            
-            # Clean up agent assistants
-            for agent_type, agent in self.agents.items():
-                if hasattr(agent, 'assistant') and agent.assistant:
-                    try:
-                        self.client.beta.assistants.delete(agent.assistant.id)
-                        print(f"✅ Deleted {agent_type.value} assistant {agent.assistant.id}")
-                        agent.assistant = None
-                    except Exception as e:
-                        print(f"⚠️ Error deleting {agent_type.value} assistant: {e}")
-                        
-        except Exception as e:
-            print(f"❌ Error during assistant cleanup: {e}")
+    def reset_conversation(self):
+        """Reset conversation state but keep agents registered"""
+        self.conversation_context = {}
+        self.current_agent = AgentType.COORDINATOR
+        self.conversation_history = []
+        print("🔄 Conversation state reset")
     
-    def __del__(self):
-        """Cleanup when coordinator is destroyed"""
-        try:
-            self.cleanup_assistants()
-        except:
-            pass  # Ignore errors during destruction
+    def switch_to_coordinator(self):
+        """Manually switch back to coordinator"""
+        self.current_agent = AgentType.COORDINATOR
+        print("🎛️ Switched to coordinator")
+    def _process_handoff_chain(self, original_message: str, max_handoffs: int = 3) -> Iterator[str]:
+        """Process a chain of handoffs to handle cases where agents hand off to each other"""
+        handoff_count = 0
+        
+        while self.pending_handoff and handoff_count < max_handoffs:
+            handoff = self.pending_handoff
+            self.pending_handoff = None  # Clear the handoff
+            handoff_count += 1
+            
+            print(f"🔄 Processing handoff #{handoff_count} to {handoff.to_agent.value}: {handoff.reason}")
+            
+            # Perform the handoff
+            if handoff.to_agent in self.agents:
+                self.current_agent = handoff.to_agent
+                # Update context with latest conversation history BEFORE handoff
+                self.conversation_context.update(handoff.context)
+                self.conversation_context["conversation_history"] = self.conversation_history.copy()
+                
+                # Continue with the new agent
+                new_agent = self.agents[handoff.to_agent]
+                new_agent_response_parts = []
+                for chunk in new_agent.process_message(handoff.user_message, self.conversation_context):
+                    new_agent_response_parts.append(chunk)
+                    yield chunk
+                
+                # Add new agent's response to coordinator conversation history
+                if new_agent_response_parts:
+                    new_full_response = "".join(new_agent_response_parts).strip()
+                    if new_full_response:
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "agent": handoff.to_agent.value,
+                            "content": new_full_response,
+                            "timestamp": time.time()
+                        })
+                
+                # Check if this agent also requested a handoff (chained handoff)
+                # Continue the loop to process the next handoff
+            else:
+                yield f"\n\nI'm sorry, the {handoff.to_agent.value} agent is not available right now."
+                break
+        
+        if handoff_count >= max_handoffs:
+            print(f"⚠️ Maximum handoff chain limit ({max_handoffs}) reached")
+            yield "\n\nI've transferred your request through multiple specialists. Please let me know if you need further assistance."

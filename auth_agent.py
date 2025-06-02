@@ -1,66 +1,64 @@
 """
-Authentication Agent
+Specialized Authentication Agent
 
 Handles member authentication, verification, and security-related tasks.
 Can hand off to other agents once authentication is completed.
+Now uses OpenAI Chat Completions API with streaming instead of Assistants API.
 """
 
 import json
 import time
-from typing import Dict, Any, Optional
-from agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
+from typing import Dict, Any, Optional, Iterator, List
+from agent_coordinator import BaseAgent, AgentType
 from openai import OpenAI
+from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 class AuthenticationAgent(BaseAgent):
     """Specialized agent for member authentication and verification"""
     
     def __init__(self, client: OpenAI):
         super().__init__(client, AgentType.AUTHENTICATION)
-        self.create_assistant()
-    
-    def create_assistant(self):
-        """Create the authentication specialist assistant"""
-        instructions = """
-You are a specialized authentication and security agent for a healthcare system.
-
-CAPABILITIES:
-- Member identity verification
-- Multi-factor authentication simulation
-- Security question validation
-- Account lockout/unlock procedures
-- Privacy and HIPAA compliance
-
-AUTHENTICATION FLOW:
-1. Collect member ID and date of birth
-2. Verify identity through additional questions if needed
-3. Simulate MFA (text/email codes)
-4. Once authenticated, hand off to appropriate service agent
-
-DEMO MODE: Accept member ID "DEMO123456" with DOB "1985-03-15" as valid.
-For other members, simulate realistic authentication flows.
-
-HANDOFF RULES:
-- After successful authentication, ask user what they need help with
-- Hand off to PRICING for cost questions
-- Hand off to PHARMACY for prescription management  
-- Hand off to BENEFITS for plan information
-- Hand off to CLINICAL for medical questions
-
-Be security-conscious but user-friendly. Explain each step clearly.
-"""
         
-        tools = [
+        # Set agent-specific properties
+        self.agent_name = "Authentication"
+        self.agent_emoji = "🔐"
+        
+        # Initialize tools and system prompt
+        self.system_prompt = self.get_system_prompt()
+        self.tools = self.get_tools()
+        
+    def get_system_prompt(self) -> str:
+        """Get the system prompt for the authentication agent"""
+        base_prompt = """
+You are a specialized authentication and security agent for a healthcare system.
+Your expertise is in member verification, security validation, and authentication workflows.
+Guide users through identity verification and multi-factor authentication clearly and securely.
+Use the 'request_handoff' function only after successful authentication when user requests other services.
+"""
+        context_awareness = get_shared_context_awareness()
+        handoff_rules = get_shared_handoff_rules(AgentType.AUTHENTICATION)
+        clarification_rules = """
+CLARIFICATION RULES:
+- Answer follow-up questions about authentication steps directly (e.g., 'What is MFA?').
+- Do not hand off clarifications within the authentication process.
+- Only hand off after successful authentication to Pricing, Pharmacy, Benefits, or Clinical.
+"""
+        return base_prompt + context_awareness + handoff_rules + clarification_rules
+        
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get the tools configuration for the authentication agent"""
+        return [
             {
                 "type": "function",
                 "function": {
                     "name": "verify_member_identity",
-                    "description": "Verify member identity with ID and DOB",
+                    "description": "Verify member identity with ID and date of birth",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "member_id": {"type": "string", "description": "Member ID"},
                             "date_of_birth": {"type": "string", "description": "Date of birth YYYY-MM-DD"},
-                            "additional_info": {"type": "string", "description": "Additional verification info"}
+                            "additional_info": {"type": "string", "description": "Additional verification info (optional)"}
                         },
                         "required": ["member_id", "date_of_birth"]
                     }
@@ -75,7 +73,7 @@ Be security-conscious but user-friendly. Explain each step clearly.
                         "type": "object",
                         "properties": {
                             "method": {"type": "string", "enum": ["sms", "email"], "description": "How to send code"},
-                            "member_id": {"type": "string"}
+                            "member_id": {"type": "string", "description": "Member ID"}
                         },
                         "required": ["method", "member_id"]
                     }
@@ -89,8 +87,8 @@ Be security-conscious but user-friendly. Explain each step clearly.
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "code": {"type": "string", "description": "6-digit code"},
-                            "member_id": {"type": "string"}
+                            "code": {"type": "string", "description": "6-digit verification code"},
+                            "member_id": {"type": "string", "description": "Member ID"}
                         },
                         "required": ["code", "member_id"]
                     }
@@ -100,12 +98,12 @@ Be security-conscious but user-friendly. Explain each step clearly.
                 "type": "function",
                 "function": {
                     "name": "request_handoff",
-                    "description": "Hand off to another specialized agent after authentication",
+                    "description": "Hand off to another specialized agent after successful authentication",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "agent_type": {
-                                "type": "string", 
+                                "type": "string",
                                 "enum": ["pricing", "pharmacy", "benefits", "clinical"],
                                 "description": "Which agent to hand off to"
                             },
@@ -116,127 +114,15 @@ Be security-conscious but user-friendly. Explain each step clearly.
                     }
                 }
             }
-		]
-        self.assistant = self.client.beta.assistants.create(
-            name="Authentication Specialist",
-            instructions=instructions,
-            model="gpt-4.1-mini",
-            tools=tools
-        )
-        
-        self.thread = self.client.beta.threads.create()
+        ]
     
-    def process_message(self, message: str, context: Dict[str, Any] = None) -> AgentResponse:
-        """Process authentication-related message"""
-        print(f"🔐 Authentication Agent processing: {message}")
-        
-        try:
-            # Ensure thread is ready for new messages
-            self._ensure_thread_ready()
-            
-            # Add user message to thread
-            self.client.beta.threads.messages.create(
-                thread_id=self.thread.id,
-                role="user",
-                content=f"{message}\n\nContext: {json.dumps(context or {})}"
-            )
-            
-            # Run assistant
-            run = self.client.beta.threads.runs.create(
-                thread_id=self.thread.id,
-                assistant_id=self.assistant.id
-            )
-            
-            # Track current run
-            self.current_run = run
-            
-            handoff_request = None
-            
-            # Handle function calls
-            run = self._wait_for_run_completion(run, self.thread.id)
-            
-            while run.status == 'requires_action':
-                tool_calls = run.required_action.submit_tool_outputs.tool_calls
-                tool_outputs = []
-                
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-                    print(f"🔧 Auth Agent calling: {function_name} with {function_args}")
-                    
-                    if function_name == "request_handoff":
-                        # Handle handoff request
-                        agent_type_str = function_args["agent_type"]
-                        reason = function_args["reason"]
-                        context_summary = function_args["context_summary"]
-                        
-                        handoff_request = HandoffRequest(
-                            from_agent=AgentType.AUTHENTICATION,
-                            to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary, "authenticated": True, "member_id": "DEMO123456"},
-                            reason=reason,
-                            user_message=message
-                        )
-                        
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps({"status": "handoff_requested"})
-                        })
-                        
-                    else:
-                        # Handle authentication functions
-                        output = self._handle_auth_function(function_name, function_args)
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": output
-                        })
-                  # Submit tool outputs
-                run = self.client.beta.threads.runs.submit_tool_outputs(
-                    thread_id=self.thread.id,
-                    run_id=run.id,
-                    tool_outputs=tool_outputs
-                )
-                
-                # Wait for completion again
-                run = self._wait_for_run_completion(run, self.thread.id)
-            
-            # Get response
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            response_text = messages.data[0].content[0].text.value
-            
-            # Authentication typically completes and hands off
-            completed = handoff_request is not None
-            
-            return AgentResponse(
-                agent_type=AgentType.AUTHENTICATION,
-                message=response_text,
-                handoff_request=handoff_request,
-                completed=completed
-            )
-            
-        except Exception as e:
-            print(f"❌ Error in Authentication Agent: {e}")
-            return AgentResponse(
-                agent_type=AgentType.AUTHENTICATION,
-                message=f"I'm sorry, I encountered an error processing your request: {str(e)}",
-                handoff_request=None,
-                completed=False
-            )
-        finally:
-            # Clear current run
-            self.current_run = None
-    
-    def _handle_auth_function(self, function_name: str, function_args: Dict[str, Any]) -> str:
-        """Handle authentication function calls"""
+    def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
+        """Handle tool calls with console output"""
         try:
             if function_name == "verify_member_identity":
                 member_id = function_args["member_id"]
                 dob = function_args["date_of_birth"]
+                additional_info = function_args.get("additional_info", "")
                 
                 print(f"🔍 Verifying identity: Member {member_id}, DOB {dob}")
                 
@@ -247,7 +133,8 @@ Be security-conscious but user-friendly. Explain each step clearly.
                         "member_id": member_id,
                         "name": "Demo User",
                         "plan_id": "DEMO_PLAN_001",
-                        "needs_mfa": False  # Skip MFA for demo
+                        "needs_mfa": False,  # Skip MFA for demo
+                        "authenticated": True
                     }
                     print(f"✅ Identity verified for Demo User")
                 else:

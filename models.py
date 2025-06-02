@@ -2,7 +2,80 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 
+class SearchMode(str, Enum):
+    """Search mode for NDC lookup"""
+    EXACT = "exact"
+    SEARCH = "search"
+
+class NDCLookupResult(BaseModel):
+    """Individual drug result from NDC lookup"""
+    ndc: str
+    drug_name: str
+    strength: str
+    dosage_form: str
+    brand_generic: str  # "brand" or "generic"
+    match: float  # Match confidence score 0.0-1.0
+
+class NDCLookupResponse(BaseModel):
+    """Response from ndcLookup function"""
+    result: List[NDCLookupResult]
+    context: str
+
+class RxPriceResult(BaseModel):
+    """Comprehensive result from calculateRxPrice function"""
+    # Basic pricing
+    member_cost: Decimal
+    plan_paid: Decimal
+    pricing_basis: str  # e.g., "AWP", "MAC", "negotiated_rate"
+    
+    # Detailed cost breakdown
+    drug_cost: Optional[Decimal] = None
+    dispensing_fee: Optional[Decimal] = None
+    total_cost: Optional[Decimal] = None
+    
+    # Member benefit details
+    copay: Optional[Decimal] = None
+    coinsurance: Optional[float] = None
+    deductible_applied: Optional[Decimal] = None
+    oop_applied: Optional[Decimal] = None
+    
+    # Plan information
+    formulary_tier: Optional[str] = None
+    formulary_status: Optional[str] = None  # "covered", "prior_auth", "step_therapy"
+    
+    # Utilization tracking
+    days_supply: Optional[int] = None
+    quantity: Optional[int] = None
+    refills_remaining: Optional[int] = None
+    
+    # Coupons and discounts
+    coupon_eligible: Optional[bool] = None
+    coupon_discount: Optional[Decimal] = None
+    manufacturer_rebate: Optional[Decimal] = None
+    
+    # Member eligibility details
+    coverage_effective_date: Optional[str] = None
+    coverage_termination_date: Optional[str] = None
+    
+    # Additional context
+    notes: Optional[str] = None
+    warnings: Optional[List[str]] = None
+
+    context: Optional[str] = None  # Additional context for the calculation
+
+class RxPriceResponse(BaseModel):
+    """Response from calculateRxPrice function"""
+    result: RxPriceResult
+
+
+class FormularyAlternativesResponse(BaseModel):
+    """Response from getFormularyAlternatives function"""
+    result: List[str]  # List of alternative NDCs
+    context: str
+
+# Legacy models for backwards compatibility
 class Drug(BaseModel):
     """Represents a drug with its NDC and details"""
     ndc: str

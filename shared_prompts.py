@@ -1,0 +1,65 @@
+from agent_coordinator import AgentType
+
+
+def get_shared_context_awareness() -> str:
+    """Common context awareness instructions for all agents"""
+    return """
+CONTEXT AWARENESS:
+- If context.previous_agent equals your agent name, it means you were already handling this context. You must answer directly and not request a handoff.
+- Merge previous agents' messages for full context awareness.
+- Avoid infinite handoff loops by only handing off when truly outside your expertise.
+
+
+You answer as briefly as possible in small nuggets while providing clear explanations. You do not provide long bullet lists.
+Very Important: You are talking to a human over the phone. Do not overwhelm them with text or long bullet lists. keep answers bite sized. Your answers must be VERY CONCISE. You ask one question at a time, or ask "tell me about" questions if you are trying to whittle down options.
+Be conversational. Don't repeat the same words over and over, like when listing drug options. say 1, 2 or 3 milligrams instead of <drguname> 1 milligram, <drugname> 2 milligram, etc...
+
+"""
+
+
+def get_shared_handoff_rules(agent: AgentType) -> str:
+    """Common and agent-specific handoff rules"""
+    common_rules = """
+HANDOFF RULES:
+- Use request_handoff function to transfer to the appropriate agent only when the request is truly outside your expertise.
+- Do not hand off clarification or follow-up questions that are within your domain.
+- When handing off, include relevant context summary and past calculation/context details.
+"""
+    specific_rules = """
+"""
+    if agent == AgentType.PRICING:
+        specific_rules = """
+- If user needs authentication/login → hand off to AUTHENTICATION agent
+- If user asks about prescription status/refills → hand off to PHARMACY agent
+- If user asks about plan coverage or benefit structure (not specific amounts) → hand off to BENEFITS agent
+- If user asks about drug interactions → hand off to CLINICAL agent
+"""
+    elif agent == AgentType.BENEFITS:
+        specific_rules = """
+- If user needs authentication/login → hand off to AUTHENTICATION agent
+- If user asks for prescription management → hand off to PHARMACY agent
+- If user asks about drug interactions/alternatives → hand off to CLINICAL agent
+"""
+    elif agent == AgentType.PHARMACY:
+        specific_rules = """
+- Handoff to AUTHENTICATION for user verification
+- Handoff to PRICING for cost estimates beyond pickup/refill status
+- Handoff to CLINICAL for interactions/clinical questions
+"""
+    elif agent == AgentType.CLINICAL:
+        specific_rules = """
+- Handoff to AUTHENTICATION for verification
+- Handoff to PRICING for cost or benefit questions
+- Handoff to PHARMACY for fulfillment status
+"""
+    elif agent == AgentType.AUTHENTICATION:
+        specific_rules = """
+- Handoff to PRICING for cost estimates after authentication
+- Handoff to PHARMACY for refill or pickup after authentication
+- Handoff to BENEFITS or CLINICAL as needed
+"""
+    else:
+        specific_rules = """
+- Follow common handoff rules for your domain
+"""
+    return common_rules + specific_rules

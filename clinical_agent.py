@@ -3,13 +3,15 @@ Specialized Clinical Agent
 
 Handles drug interactions, clinical criteria, therapeutic alternatives, and medical guidance.
 Can hand off to other agents when needed (e.g., pricing, benefits, pharmacy).
+Now uses OpenAI Chat Completions API with streaming instead of Assistants API.
 """
 
 import json
 import time
-from typing import Dict, Any, Optional
-from agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
+from typing import Dict, Any, Optional, List
+from agent_coordinator import BaseAgent, AgentType
 from openai import OpenAI
+from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 
 class ClinicalAgent(BaseAgent):
@@ -17,45 +19,36 @@ class ClinicalAgent(BaseAgent):
     
     def __init__(self, client: OpenAI):
         super().__init__(client, AgentType.CLINICAL)
-        self.create_assistant()
-    
-    def create_assistant(self):
-        """Create the clinical specialist assistant"""
-        instructions = """
+        
+        # Set agent-specific properties
+        self.agent_name = "Clinical"
+        self.agent_emoji = "⚕️"
+        
+        # Initialize tools and system prompt
+        self.system_prompt = self.get_system_prompt()
+        self.tools = self.get_tools()
+        
+    def get_system_prompt(self) -> str:
+        """Get the system prompt for the clinical agent"""
+        base_prompt = """
 You are a specialized clinical pharmacist expert for a healthcare system.
 Your expertise is in drug interactions, therapeutic alternatives, clinical criteria, and medication safety.
-
-CAPABILITIES:
-- Drug interaction checking
-- Therapeutic alternative recommendations
-- Clinical criteria evaluation
-- Medication safety alerts
-- Allergy checking
-- Contraindication analysis
-- Dosing guidance
-- Age-appropriate alternatives
-
-IMPORTANT: You provide clinical information but always remind users to consult their healthcare provider for medical decisions.
-
-MEMBER INFO: For demos, use member ID "DEMO123456" with DOB "1985-03-15"
-
-HANDOFF SCENARIOS:
-- If user needs authentication/login → hand off to AUTHENTICATION agent
-- If user asks about drug costs/pricing → hand off to PRICING agent  
-- If user needs prescription management → hand off to PHARMACY agent
-- If user needs plan coverage details → hand off to BENEFITS agent
-
-WORKFLOW:
-1. Assess clinical request for drug interactions, alternatives, etc.
-2. Provide evidence-based clinical information
-3. Always recommend consulting healthcare provider
-4. Hand off for non-clinical needs (pricing, coverage, refills)
-
-Use the 'request_handoff' function when user needs services outside your expertise.
-Always prioritize patient safety and evidence-based recommendations.
+Provide clear, evidence-based clinical information in concise responses.
+Use the 'request_handoff' function only when services outside your clinical domain are needed.
 """
+        context_awareness = get_shared_context_awareness()
+        handoff_rules = get_shared_handoff_rules(AgentType.CLINICAL)
+        clarification_rules = """
+CLARIFICATION_RULES:
+- After providing clinical recommendations, answer follow-up questions directly, such as 'What does that interaction imply?' or 'How serious is this?'
+- Avoid handoffs for clarifications within the clinical scope.
+- Only hand off pricing, coverage, prescription management, or authentication questions outside the clinical domain.
+"""
+        return base_prompt + context_awareness + handoff_rules + clarification_rules
         
-        tools = [
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get the tools configuration for the clinical agent"""
+        return [
             {
                 "type": "function",
                 "function": {
@@ -185,117 +178,9 @@ Always prioritize patient safety and evidence-based recommendations.
                 }
             }
         ]
-        self.assistant = self.client.beta.assistants.create(
-            name="Clinical Pharmacist Specialist",
-            instructions=instructions,
-            model="gpt-4.1-mini",
-            tools=tools
-        )
-        
-        self.thread = self.client.beta.threads.create()
-    def process_message(self, message: str, context: Dict[str, Any] = None) -> AgentResponse:
-        """Process message and return response with potential handoff"""
-        print(f"⚕️ Clinical Agent processing: {message}")
-        
-        try:
-            # Ensure thread is ready for new messages
-            self._ensure_thread_ready()
-            
-            # Add user message to thread
-            self.client.beta.threads.messages.create(
-                thread_id=self.thread.id,
-                role="user",
-                content=f"{message}\n\nContext: {json.dumps(context or {})}"
-            )
-            
-            # Run assistant
-            run = self.client.beta.threads.runs.create(
-                thread_id=self.thread.id,
-                assistant_id=self.assistant.id
-            )
-            
-            # Track current run
-            self.current_run = run
-            
-            handoff_request = None
-            
-            # Handle function calls
-            run = self._wait_for_run_completion(run, self.thread.id)
-            
-            while run.status == 'requires_action':
-                tool_calls = run.required_action.submit_tool_outputs.tool_calls
-                tool_outputs = []
-                
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-                    print(f"🔧 Clinical Agent calling: {function_name} with {function_args}")
-                    
-                    if function_name == "request_handoff":
-                        # Handle handoff request
-                        agent_type_str = function_args["agent_type"]
-                        reason = function_args["reason"]
-                        context_summary = function_args["context_summary"]
-                        handoff_request = HandoffRequest(
-                            from_agent=AgentType.CLINICAL,
-                            to_agent=AgentType(agent_type_str),
-                            context={"summary": context_summary},
-                            reason=reason,
-                            user_message=message
-                        )
-                        
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps({"status": "handoff_requested"})
-                        })
-                        
-                    else:
-                        # Handle regular function calls
-                        output = self._handle_function_call(function_name, function_args)
-                        tool_outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": output
-                        })
-                  # Submit tool outputs
-                run = self.client.beta.threads.runs.submit_tool_outputs(
-                    thread_id=self.thread.id,
-                    run_id=run.id,
-                    tool_outputs=tool_outputs
-                )
-                
-                # Wait for completion again
-                run = self._wait_for_run_completion(run, self.thread.id)
-            
-            # Get response
-            messages = self.client.beta.threads.messages.list(
-                thread_id=self.thread.id,
-                order="desc",
-                limit=1
-            )
-            
-            response_text = messages.data[0].content[0].text.value
-            
-            return AgentResponse(
-                agent_type=AgentType.CLINICAL,
-                message=response_text,
-                handoff_request=handoff_request,
-                completed=False  # Clinical agent typically stays active for follow-ups
-            )
-            
-        except Exception as e:
-            print(f"❌ Error in Clinical Agent: {e}")
-            return AgentResponse(
-                agent_type=AgentType.CLINICAL,
-                message=f"I'm sorry, I encountered an error processing your request: {str(e)}",
-                handoff_request=None,
-                completed=False
-            )
-        finally:
-            # Clear current run
-            self.current_run = None
     
-    def _handle_function_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
-        """Handle function calls with mock clinical data"""
+    def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
+        """Handle tool calls with console output"""
         try:
             if function_name == "check_drug_interactions":
                 drug_list = function_args.get("drug_list", [])

@@ -65,13 +65,12 @@ class MultiAgentHealthcareApp:
             self.coordinator.register_agent(agent)
             self.console.print(f"✅ {name} initialized")
         
-        self.console.print("\\n🎛️ Multi-Agent Coordinator ready!", style="bold green")
-    
+        self.console.print("\n🎛️ Multi-Agent Coordinator ready!", style="bold green")
     def display_welcome(self):
         """Display welcome message and available services"""
         welcome_text = Text()
-        welcome_text.append("🏥 Healthcare Multi-Agent Assistant\\n", style="bold blue")
-        welcome_text.append("Intelligent healthcare services with specialized experts\\n\\n")
+        welcome_text.append("🏥 Healthcare Multi-Agent Assistant\n", style="bold blue")
+        welcome_text.append("Intelligent healthcare services with specialized experts\n\n")
         
         # Create services table
         table = Table(title="Available Services", show_header=True, header_style="bold magenta")
@@ -95,10 +94,9 @@ class MultiAgentHealthcareApp:
             title="🤖 Multi-Agent Healthcare System",
             border_style="blue"
         )
-        
         self.console.print(panel)
-        self.console.print("\\n💡 The system will automatically route your questions to the right specialist!", style="dim")
-        self.console.print("🔄 Agents can hand off to each other when you need different services.\\n", style="dim")
+        self.console.print("\n💡 The system will automatically route your questions to the right specialist!", style="dim")
+        self.console.print("🔄 Agents can hand off to each other when you need different services.\n", style="dim")
     
     def display_conversation_state(self):
         """Display current conversation state and agent status"""
@@ -126,11 +124,10 @@ class MultiAgentHealthcareApp:
         )
         
         return panel
-    
     def run_demo_scenarios(self):
         """Run several demo scenarios to show agent handoffs"""
-        self.console.print("\\n🎭 Running Demo Scenarios", style="bold yellow")
-        self.console.print("Watch how agents hand off to each other based on your needs!\\n")
+        self.console.print("\n🎭 Running Demo Scenarios", style="bold yellow")
+        self.console.print("Watch how agents hand off to each other based on your needs!\n")
         
         scenarios = [
             {
@@ -166,27 +163,26 @@ class MultiAgentHealthcareApp:
                 ]
             }
         ]
-        
         for i, scenario in enumerate(scenarios, 1):
-            self.console.print(f"\\n📋 Scenario {i}: {scenario['title']}", style="bold")
+            self.console.print(f"\n📋 Scenario {i}: {scenario['title']}", style="bold")
             self.console.print(f"   {scenario['description']}", style="dim")
             
-            user_input = Prompt.ask(f"\\n[bold]Run this scenario?[/bold]", choices=["y", "n", "s"], default="y")
-            
+            user_input = Prompt.ask(f"\n[bold]Run this scenario?[/bold]", choices=["y", "n", "s"], default="y")
             if user_input == "n":
                 continue
             elif user_input == "s":
                 break
                 
             for message in scenario["messages"]:
-                self.console.print(f"\\n👤 [bold]User:[/bold] {message}")
-                
-                # Show processing indicator
+                self.console.print(f"\n👤 [bold]User:[/bold] {message}")
+                  # Show processing indicator
                 with Live("🤔 Processing...", console=self.console) as live:
-                    response = self.coordinator.process_message(message)
+                    response_text = ""
+                    for chunk in self.coordinator.process_message(message):
+                        response_text += chunk
                     live.update("✅ Complete!")
                 
-                self.console.print(f"🤖 [bold]Assistant:[/bold] {response}")
+                self.console.print(f"🤖 [bold]Assistant:[/bold] {response_text}")
                 
                 # Show conversation state
                 state_panel = self.display_conversation_state()
@@ -194,22 +190,20 @@ class MultiAgentHealthcareApp:
                 
                 time.sleep(1)  # Brief pause between messages
         
-        self.console.print("\\n✨ Demo scenarios complete! Now try your own questions.", style="bold green")
-    
+        self.console.print("\n✨ Demo scenarios complete! Now try your own questions.", style="bold green")
     def run_interactive_session(self):
         """Run interactive chat session"""
-        self.console.print("\\n💬 Interactive Chat Session", style="bold blue")
+        self.console.print("\n💬 Interactive Chat Session", style="bold blue")
         self.console.print("Type your questions and see the agents work together!")
-        self.console.print("Commands: 'help', 'status', 'demo', 'quit'\\n")
+        self.console.print("Commands: 'help', 'status', 'demo', 'quit'\n")
         
         while True:
             try:
                 # Show current state
                 state_panel = self.display_conversation_state()
                 self.console.print(state_panel)
-                
-                # Get user input
-                user_input = Prompt.ask("\\n[bold cyan]You[/bold cyan]")
+                  # Get user input
+                user_input = Prompt.ask("\n[bold cyan]You[/bold cyan]")
                 
                 if user_input.lower() in ['quit', 'exit', 'q']:
                     break
@@ -223,25 +217,26 @@ class MultiAgentHealthcareApp:
                 elif user_input.lower() == 'demo':
                     self.run_demo_scenarios()
                     continue
-                
-                # Process with coordinator
+                  # Process with coordinator
                 with Live("🤔 Processing your request...", console=self.console) as live:
-                    response = self.coordinator.process_message(user_input)
+                    response_text = ""
+                    for chunk in self.coordinator.process_message(user_input):
+                        response_text += chunk
+                        live.update(f"🤔 Processing... {response_text[-20:]}")
                     live.update("✅ Response ready!")
                 
                 # Display response in a nice panel
                 response_panel = Panel(
-                    response,
+                    response_text,
                     title=f"🤖 {self.coordinator.current_agent.value.title()} Agent",
                     border_style="green"
                 )
                 self.console.print(response_panel)
-                
             except KeyboardInterrupt:
-                self.console.print("\\n\\n👋 Session interrupted. Goodbye!", style="bold yellow")
+                self.console.print("\n\n👋 Session interrupted. Goodbye!", style="bold yellow")
                 break
             except Exception as e:
-                self.console.print(f"\\n❌ Error: {str(e)}", style="bold red")
+                self.console.print(f"\n❌ Error: {str(e)}", style="bold red")
                 self.console.print("Please try again or type 'quit' to exit.")
     
     def run(self):
@@ -250,9 +245,9 @@ class MultiAgentHealthcareApp:
             # Display welcome
             self.display_welcome()
             
-            # Ask user what they want to do
+            # Ask user what they want to do            
             choice = Prompt.ask(
-                "\\n[bold]What would you like to do?[/bold]",
+                "\n[bold]What would you like to do?[/bold]",
                 choices=["demo", "chat", "both"],
                 default="both"
             )
@@ -263,12 +258,12 @@ class MultiAgentHealthcareApp:
             if choice in ["chat", "both"]:
                 self.run_interactive_session()
             
-            self.console.print("\\n👋 Thank you for using the Multi-Agent Healthcare System!", style="bold blue")
+            self.console.print("\n👋 Thank you for using the Multi-Agent Healthcare System!", style="bold blue")
             
         except KeyboardInterrupt:
-            self.console.print("\\n\\n👋 Application terminated. Goodbye!", style="bold yellow")
+            self.console.print("\n\n👋 Application terminated. Goodbye!", style="bold yellow")
         except Exception as e:
-            self.console.print(f"\\n❌ Application error: {str(e)}", style="bold red")
+            self.console.print(f"\n❌ Application error: {str(e)}", style="bold red")
             sys.exit(1)
 
 
