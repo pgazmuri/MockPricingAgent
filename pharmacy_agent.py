@@ -16,8 +16,8 @@ from shared_prompts import get_shared_context_awareness, get_shared_handoff_rule
 class PharmacyAgent(BaseAgent):
     """Specialized agent for pharmacy services and prescription management"""
     
-    def __init__(self, client: OpenAI):
-        super().__init__(client, AgentType.PHARMACY)
+    def __init__(self, client: OpenAI, model: str = "gpt-4.1"):
+        super().__init__(client, AgentType.PHARMACY, model=model)
         
         # Set agent-specific properties
         self.agent_name = "Pharmacy"
@@ -32,6 +32,8 @@ class PharmacyAgent(BaseAgent):
 You are a specialized pharmacy services expert for a healthcare system.
 Your expertise is in prescription management, refills, transfers, and pharmacy operations.
 Provide clear and concise information on prescription status, refill scheduling, transfers, and pickup details.
+Always ensure member verification before processing requests with specific information like refills, and always get confirmation to proceed.
+You do not need to ask for member pharmacy ID or prescription ID, the system has this information once the member is authenticated.
 Use the 'request_handoff' function only when your expertise domain is exceeded.
 """
         context_awareness = get_shared_context_awareness()

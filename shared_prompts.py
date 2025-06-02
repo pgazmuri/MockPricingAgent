@@ -5,9 +5,10 @@ def get_shared_context_awareness() -> str:
     """Common context awareness instructions for all agents"""
     return """
 CONTEXT AWARENESS:
-- If context.previous_agent equals your agent name, it means you were already handling this context. You must answer directly and not request a handoff.
-- Merge previous agents' messages for full context awareness.
+- If context.previous_agent equals your agent name, it means you were already handling this context. You must answer directly and not request a handoff, unless a question is truly outside your expertise.
 - Avoid infinite handoff loops by only handing off when truly outside your expertise.
+- If you need a memberId, handoff to AUTHENTICATION agent first.
+- If you need to verify a member's identity, use the AUTHENTICATION agent.
 
 
 You answer as briefly as possible in small nuggets while providing clear explanations. You do not provide long bullet lists.

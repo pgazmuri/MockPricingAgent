@@ -17,7 +17,7 @@ from shared_prompts import get_shared_context_awareness, get_shared_handoff_rule
 
 class PricingAgent(BaseAgent):
     """Specialized agent for drug pricing and cost calculations"""    
-    def __init__(self, client: OpenAI, model: str = "gpt-4o-mini"):
+    def __init__(self, client: OpenAI, model: str = "gpt-4.1"):
         super().__init__(client, AgentType.PRICING, coordinator=None, model=model)
         self.pbm_services = MockPBMServices()
         self.math_calculator = MathCalculator()
@@ -34,12 +34,14 @@ class PricingAgent(BaseAgent):
         # Base pricing agent prompt
         base_prompt = """
 You are a specialized drug pricing voice agent for a Pharmacy Benefits Manager (PBM).
-Your expertise is in calculating drug costs, insurance benefits, and pricing estimates.
-You make it easy for customers, often older Medicare patients, to find and understand drug costs.
+Your expertise is in helping users find their medications and explaining drug costs, insurance benefits, and pricing estimates.
+You make it easy for customers, often older Medicare patients, to find and understand drug costs, as well as explore alternatives.
 Keep answers bite-sized and conversational. Do not overwhelm with long lists.
 Always show your mathematical work clearly using the calculation functions.
 Use the 'request_handoff' function only when the request is truly outside your expertise.
 Don't call the ndc function if the user doesn't know their medication name. Help them figure it out first based on your knowledge.
+Never ask for an NDC code directly; instead, ask for the drug name or other identifying information. Your conversation partner doesn't know anything about NDC codes.
+You do not need to ask about insurance or member ID, as the pricing system will always have access to the member's insurance information once authenticated.
 """
         # Shared context awareness and handoff rules
         context_awareness = get_shared_context_awareness()
@@ -50,6 +52,7 @@ CLARIFICATION RULES:
 - After providing a specific dollar amount, you MUST answer follow-up questions about that amount directly.
 - If the user asks "So I pay $X?" or "What's my out-of-pocket?", refer to your previous calculation.
 - Only hand off plan structure or benefit policy questions without specific amounts to the Benefits agent.
+- Always hand off to Pharmacy agent for prescription status or refill requests.
 """
         return base_prompt + context_awareness + handoff_rules + clarification_rules
     def get_tools(self) -> List[Dict[str, Any]]:
@@ -60,7 +63,7 @@ CLARIFICATION RULES:
                 "type": "function",
                 "function": {
                     "name": "ndcLookup",
-                    "description": "Search for drugs by name to find specific drug products with NDCs",
+                    "description": "Search for drugs by name to lookup and find specific drug products with NDCs",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -80,14 +83,12 @@ CLARIFICATION RULES:
                 "type": "function",
                 "function": {
                     "name": "calculateRxPrice",
-                    "description": "Calculate prescription price with member cost and plan cost breakdown",
+                    "description": "Calculate prescription price with member cost and plan cost breakdown, taking into account member's insurance and other plan details. Requires an authenticated member ID.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "ndc": {"type": "string", "description": "National Drug Code"},
-                            "pharmacyNpi": {"type": "string", "description": "Pharmacy NPI number"},
-                            "memberId": {"type": "string", "description": "Member ID"},
-                            "fillDate": {"type": "string", "description": "Fill date in YYYY-MM-DD format"}
+                            "memberId": {"type": "string", "description": "Member ID"}
                         },
                         "required": ["ndc", "pharmacyNpi", "memberId", "fillDate"]
                     }
@@ -256,11 +257,9 @@ CLARIFICATION RULES:
                 
             elif function_name == "calculateRxPrice":
                 ndc = function_args["ndc"]
-                pharmacy_npi = function_args["pharmacyNpi"]
                 member_id = function_args["memberId"]
-                fill_date = function_args["fillDate"]
                 
-                result = self.pbm_services.calculate_rx_price(ndc, pharmacy_npi, member_id, fill_date)
+                result = self.pbm_services.calculate_rx_price(ndc, member_id)
                 print(f"💰 Prescription Price Calculation:")
                 print(f"   Plan Price: ${result.result.drug_cost}")
                 print(f"   Member Cost: ${result.result.member_cost}")

@@ -17,8 +17,8 @@ from shared_prompts import get_shared_context_awareness, get_shared_handoff_rule
 class BenefitsAgent(BaseAgent):
     """Specialized agent for plan benefits and coverage information"""
     
-    def __init__(self, client: OpenAI):
-        super().__init__(client, AgentType.BENEFITS)
+    def __init__(self, client: OpenAI, model: str = "gpt-4.1"):
+        super().__init__(client, AgentType.BENEFITS, model=model)
         
         # Set agent-specific properties
         self.agent_name = "Benefits"

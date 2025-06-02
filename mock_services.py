@@ -130,7 +130,7 @@ class MockPBMServices:
         context = f"Fallback NDC lookup for '{query}' using {mode} mode. Found {len(results)} results."
         return NDCLookupResponse(result=results, context=context)
     
-    def calculate_rx_price(self, ndc: str, pharmacy_npi: str, member_id: str, fill_date: str) -> RxPriceResponse:
+    def calculate_rx_price(self, ndc: str, member_id: str) -> RxPriceResponse:
         """
         Mock prescription price calculation using OpenAI to generate comprehensive response
         Args:
@@ -145,9 +145,7 @@ class MockPBMServices:
         You are a PBM (Pharmacy Benefit Manager) pricing system. Generate a comprehensive, realistic prescription pricing response for the following request:
 
         NDC: {ndc}
-        Pharmacy NPI: {pharmacy_npi}
         Member ID: {member_id}
-        Fill Date: {fill_date}
 
         Generate a detailed JSON response that includes:
         1. Basic pricing (member_cost, plan_paid, pricing_basis)
@@ -198,7 +196,7 @@ class MockPBMServices:
         try:
             # Use OpenAI to generate comprehensive pricing response
             response = self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-4.1-mini",
                 messages=[
                     {"role": "system", "content": "You are a PBM pricing system API. Generate realistic pharmaceutical pricing data in JSON format only."},
                     {"role": "user", "content": prompt}
@@ -241,7 +239,7 @@ class MockPBMServices:
                 coverage_termination_date=pricing_data.get("coverage_termination_date"),
                 notes=pricing_data.get("notes"),
                 warnings=pricing_data.get("warnings", []),
-                context = pricing_data.get("context", f"Comprehensive price calculated for NDC {ndc} at pharmacy {pharmacy_npi} for member {member_id} on {fill_date}. Generated using AI-powered pricing engine with full benefit analysis.")
+                context = pricing_data.get("context", f"Comprehensive price calculated for NDC {ndc} at pharmacy for member {member_id}. Generated using AI-powered pricing engine with full benefit analysis.")
             )
             
             print("=== OpenAI Pricing Response ===")
