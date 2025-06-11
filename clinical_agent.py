@@ -48,7 +48,7 @@ CLARIFICATION_RULES:
         
     def get_tools(self) -> List[Dict[str, Any]]:
         """Get the tools configuration for the clinical agent"""
-        return [
+        base_tools = [
             {
                 "type": "function",
                 "function": {
@@ -153,31 +153,17 @@ CLARIFICATION_RULES:
                                 "description": "Type of safety alert (optional)"
                             }
                         },
-                        "required": ["drug_name"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "request_handoff",
-                    "description": "Hand off to another specialized agent",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "agent_type": {
-                                "type": "string",
-                                "enum": ["authentication", "pricing", "pharmacy", "benefits"],
-                                "description": "Which agent to hand off to"
-                            },
-                            "reason": {"type": "string", "description": "Why handoff is needed"},
-                            "context_summary": {"type": "string", "description": "Context for receiving agent"}
-                        },
-                        "required": ["agent_type", "reason", "context_summary"]
-                    }
+                        "required": ["drug_name"]                    }
                 }
             }
         ]
+        
+        # Add the handoff tool from base class
+        handoff_tool = self.get_handoff_tool()
+        if handoff_tool:
+            base_tools.append(handoff_tool)
+            
+        return base_tools
     
     def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
         """Handle tool calls with console output"""

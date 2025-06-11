@@ -24,6 +24,11 @@ class AgentType(Enum):
     BENEFITS = "benefits"
     CLINICAL = "clinical"
 
+class CoordinationMode(Enum):
+    """Coordination modes for multi-agent system"""
+    COORDINATOR = "coordinator"  # Agents always handoff back to coordinator
+    SWARM = "swarm"             # Agents can handoff directly to each other
+
 @dataclass
 class HandoffRequest:
     """Request to hand off conversation to another agent"""
@@ -53,13 +58,25 @@ class BaseAgent:
         self.conversation_history = []
         self.tools = []
         self.system_prompt = ""
-          # Agent-specific properties (can be overridden by subclasses)
+        self.coordination_mode = CoordinationMode.SWARM  # Default mode, will be set by coordinator
+        # Agent-specific properties (can be overridden by subclasses)
         self.agent_name = agent_type.value.title()
         self.agent_emoji = "🤖"
-    
+        
     def request_handoff(self, to_agent: AgentType, reason: str, context_summary: str, user_message: str):
         """Request a handoff to another agent"""
         if self.coordinator:
+            # In coordinator mode, all handoffs go back to coordinator
+            if self.coordination_mode == CoordinationMode.COORDINATOR:
+                target_agent = AgentType.COORDINATOR
+                print(f"🔄 {self.agent_type.value} agent requesting handoff to coordinator (coordinator mode): {reason}")
+                # Include the intended final destination in the context
+                context_summary = f"[INTENDED FOR {to_agent.value.upper()}] {context_summary}"
+            else:
+                # In swarm mode, direct handoffs are allowed
+                target_agent = to_agent
+                print(f"🔄 {self.agent_type.value} agent requesting handoff to {to_agent.value} (swarm mode): {reason}")
+            
             # Merge local agent conversation history with coordinator history for complete context
             merged_history = self.coordinator.conversation_history.copy()
             
@@ -74,19 +91,67 @@ class BaseAgent:
                 "summary": context_summary,
                 "conversation_history": merged_history,
                 "previous_agent": self.agent_type.value,
-                "handoff_reason": reason
+                "handoff_reason": reason,
+                "intended_agent": to_agent.value if self.coordination_mode == CoordinationMode.COORDINATOR else None
             }
             
             handoff_request = HandoffRequest(
                 from_agent=self.agent_type,
-                to_agent=to_agent,
+                to_agent=target_agent,
                 context=handoff_context,
                 reason=reason,
                 user_message=user_message
             )
             self.coordinator.pending_handoff = handoff_request
-            print(f"🔄 {self.agent_type.value} agent requesting handoff to {to_agent.value}: {reason}")
     
+    
+    def get_handoff_tool(self) -> Dict[str, Any]:
+        """Get the handoff tool based on coordination mode"""
+        if self.coordination_mode == CoordinationMode.COORDINATOR:
+            # In coordinator mode, agents only hand back to coordinator
+            return {
+                "type": "function",
+                "function": {
+                    "name": "request_handoff",
+                    "description": "Hand off back to coordinator when request is outside your expertise",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_type": {
+                                "type": "string",
+                                "enum": ["coordinator"],
+                                "description": "Always hand off to coordinator in coordinator mode",
+                                "default": "coordinator"
+                            },
+                            "reason": {"type": "string", "description": "Why handoff is needed"},
+                            "context_summary": {"type": "string", "description": "Context for coordinator to make routing decision"}
+                        },
+                        "required": ["reason", "context_summary"]
+                    }
+                }
+            }
+        else:
+            # In swarm mode, agents can handoff directly to other agents
+            return {
+                "type": "function",
+                "function": {
+                    "name": "request_handoff",
+                    "description": "Hand off to another specialized agent",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_type": {
+                                "type": "string",
+                                "enum": ["authentication", "pharmacy", "benefits", "clinical", "pricing"],
+                                "description": "Which agent to hand off to"
+                            },
+                            "reason": {"type": "string", "description": "Why handoff is needed"},
+                            "context_summary": {"type": "string", "description": "Context for receiving agent"}
+                        },
+                        "required": ["agent_type", "reason", "context_summary"]
+                    }
+                }
+            }
     
     def create_agent(self) -> None:
         """Create the agent configuration - to be implemented by subclasses"""
@@ -275,9 +340,10 @@ class BaseAgent:
 class MultiAgentCoordinator:
     """Coordinates multiple agents and manages handoffs using streaming completion API"""
     
-    def __init__(self, coordinator_model: str = "gpt-4o-mini"):
+    def __init__(self, coordinator_model: str = "gpt-4o-mini", coordination_mode: CoordinationMode = CoordinationMode.SWARM):
         self.client = OpenAI(api_key=keys.OPENAI_API_KEY)
         self.coordinator_model = coordinator_model  # Allow specifying coordinator model
+        self.coordination_mode = coordination_mode  # Mode for coordination behavior
         self.agents: Dict[AgentType, BaseAgent] = {}
         self.conversation_context = {}
         self.current_agent = AgentType.COORDINATOR
@@ -285,13 +351,12 @@ class MultiAgentCoordinator:
         self.pending_handoff: Optional[HandoffRequest] = None
         self.coordinator_tools = self._create_coordinator_tools()
         self.coordinator_system_prompt = self._create_coordinator_system_prompt()
+        
+        print(f"🎛️ Coordinator initialized in {coordination_mode.value.upper()} mode")    
     def _create_coordinator_system_prompt(self) -> str:
-        """Create the coordinator system prompt"""
-        return """
+        """Create the coordinator system prompt based on coordination mode"""
+        base_prompt = """
 You are a smart coordinator for a healthcare/pharmacy system with multiple specialized agents.
-
-Your ONLY job is to understand user intent and immediately hand off to the appropriate specialist. 
-DO NOT respond to the user directly - ALWAYS use the request_handoff function immediately.
 
 AVAILABLE AGENTS:
 - PRICING: Drug cost calculations, insurance benefits, pricing estimates
@@ -306,7 +371,26 @@ HANDOFF RULES:
 - For drug costs, pricing, insurance → hand off to PRICING
 - For plan details, coverage → hand off to BENEFITS
 - For drug interactions, alternatives → hand off to CLINICAL
-
+"""
+        
+        if self.coordination_mode == CoordinationMode.COORDINATOR:
+            mode_specific = """
+COORDINATOR MODE: Your job is to understand user intent and route to the appropriate specialist.
+- Always use the request_handoff function to transfer to the appropriate agent
+- Never respond to the user directly - let the specialists handle responses
+- When an agent completes a task, you'll route follow-up questions to the right agent
+- Agents will return control to you for routing decisions
+"""
+        else:  # SWARM mode
+            mode_specific = """
+SWARM MODE: Your job is to understand user intent and route to the appropriate specialist for initial requests.
+- Use the request_handoff function for initial routing
+- Never respond to the user directly - let the specialists handle responses  
+- Agents may hand off directly to each other when needed
+- Only route when conversation returns to you or for new initial requests
+"""
+        
+        return base_prompt + mode_specific + """
 IMPORTANT: Never respond to the user directly. Always use request_handoff function immediately to transfer to the appropriate agent. The specialist will handle the actual response.
 """
     
@@ -339,17 +423,16 @@ IMPORTANT: Never respond to the user directly. Always use request_handoff functi
                     }
                 }
             }        ]
-    
     def register_agent(self, agent: BaseAgent):
         """Register a specialized agent"""
         agent.coordinator = self  # Give agent reference to coordinator
+        agent.coordination_mode = self.coordination_mode  # Set agent's coordination mode
         self.agents[agent.agent_type] = agent
-        print(f"🤖 Registered {agent.agent_type.value} agent")
-    
+        print(f"🤖 Registered {agent.agent_type.value} agent in {self.coordination_mode.value} mode")
     def process_message(self, user_message: str) -> Iterator[str]:
         """Process user message and coordinate between agents with streaming"""
         print(f"\n👤 User: {user_message}")
-        print(f"🎛️ Current agent: {self.current_agent.value}")
+        print(f"🎛️ Current agent: {self.current_agent.value} (Mode: {self.coordination_mode.value})")
         
         # Clear any pending handoffs from previous interactions
         self.pending_handoff = None
@@ -363,38 +446,81 @@ IMPORTANT: Never respond to the user directly. Always use request_handoff functi
         
         # Include conversation history in context
         self.conversation_context["conversation_history"] = self.conversation_history.copy()
-          # If we're currently with a specialized agent, try them first
-        if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
-            current_agent = self.agents[self.current_agent]
-            print(f"🎯 Continuing conversation with {self.current_agent.value} agent...")
-            
-            # Collect the agent's response
-            agent_response_parts = []
-            for chunk in current_agent.process_message(user_message, self.conversation_context):
-                agent_response_parts.append(chunk)
-                yield chunk
-            
-            # Add agent's response to coordinator conversation history
-            if agent_response_parts:
-                full_response = "".join(agent_response_parts).strip()
-                if full_response:
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "agent": self.current_agent.value,
-                        "content": full_response,
-                        "timestamp": time.time()
-                    })
-                  # Check for pending handoffs after streaming is complete
-            if self.pending_handoff:
-                # Process handoffs recursively to handle chained handoffs
-                for chunk in self._process_handoff_chain(user_message):
+          
+        # Handle coordinator mode logic
+        if self.coordination_mode == CoordinationMode.COORDINATOR:
+            # In coordinator mode, always route through coordinator except for follow-up with same agent
+            if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
+                # Check if this is a follow-up question for the same agent
+                current_agent = self.agents[self.current_agent]
+                print(f"🎯 Following up with {self.current_agent.value} agent...")
+                
+                # Collect the agent's response
+                agent_response_parts = []
+                for chunk in current_agent.process_message(user_message, self.conversation_context):
+                    agent_response_parts.append(chunk)
                     yield chunk
-            return
-        
-        # Otherwise, use coordinator to determine routing
-        print(f"🎛️ Using coordinator to route message...")
-        for chunk in self._coordinate_request(user_message):
-            yield chunk
+                
+                # Add agent's response to coordinator conversation history
+                if agent_response_parts:
+                    full_response = "".join(agent_response_parts).strip()
+                    if full_response:
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "agent": self.current_agent.value,
+                            "content": full_response,
+                            "timestamp": time.time()
+                        })
+                      
+                # In coordinator mode, agents hand back to coordinator
+                if self.pending_handoff:
+                    # Process handoff back to coordinator, then route to intended agent
+                    for chunk in self._process_coordinator_mode_handoff(user_message):
+                        yield chunk
+                else:
+                    # No handoff requested, stay with current agent or return to coordinator
+                    self.current_agent = AgentType.COORDINATOR
+                    print(f"🔄 Returning to coordinator for next routing decision")
+                return
+            else:
+                # Route through coordinator
+                print(f"🎛️ Using coordinator to route message...")
+                for chunk in self._coordinate_request(user_message):
+                    yield chunk
+        else:
+            # SWARM mode - existing behavior
+            # If we're currently with a specialized agent, try them first
+            if self.current_agent != AgentType.COORDINATOR and self.current_agent in self.agents:
+                current_agent = self.agents[self.current_agent]
+                print(f"🎯 Continuing conversation with {self.current_agent.value} agent...")
+                
+                # Collect the agent's response
+                agent_response_parts = []
+                for chunk in current_agent.process_message(user_message, self.conversation_context):
+                    agent_response_parts.append(chunk)
+                    yield chunk
+                
+                # Add agent's response to coordinator conversation history
+                if agent_response_parts:
+                    full_response = "".join(agent_response_parts).strip()
+                    if full_response:
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "agent": self.current_agent.value,
+                            "content": full_response,
+                            "timestamp": time.time()
+                        })
+                      # Check for pending handoffs after streaming is complete
+                if self.pending_handoff:
+                    # Process handoffs recursively to handle chained handoffs
+                    for chunk in self._process_handoff_chain(user_message):
+                        yield chunk
+                return
+            
+            # Otherwise, use coordinator to determine routing
+            print(f"🎛️ Using coordinator to route message...")
+            for chunk in self._coordinate_request(user_message):
+                yield chunk
     
     def _coordinate_request(self, user_message: str) -> Iterator[str]:
         """Use coordinator to determine which agent should handle the request"""
@@ -568,11 +694,80 @@ IMPORTANT: Never respond to the user directly. Always use request_handoff functi
         self.current_agent = AgentType.COORDINATOR
         self.conversation_history = []
         print("🔄 Conversation state reset")
-    
     def switch_to_coordinator(self):
         """Manually switch back to coordinator"""
         self.current_agent = AgentType.COORDINATOR
         print("🎛️ Switched to coordinator")
+    
+    def set_coordination_mode(self, mode: CoordinationMode):
+        """Change coordination mode and update all agents"""
+        old_mode = self.coordination_mode
+        self.coordination_mode = mode
+        
+        # Update all registered agents
+        for agent in self.agents.values():
+            agent.coordination_mode = mode
+        
+        # Update coordinator prompt for new mode
+        self.coordinator_system_prompt = self._create_coordinator_system_prompt()
+        
+        print(f"🔄 Coordination mode changed from {old_mode.value} to {mode.value}")
+        print(f"📋 All {len(self.agents)} agents updated to {mode.value} mode")
+    
+    def get_coordination_mode(self) -> CoordinationMode:
+        """Get current coordination mode"""
+        return self.coordination_mode
+    def _process_coordinator_mode_handoff(self, original_message: str) -> Iterator[str]:
+        """Process handoffs in coordinator mode - route to intended agent"""
+        if not self.pending_handoff:
+            return
+            
+        handoff = self.pending_handoff
+        self.pending_handoff = None
+        
+        # Extract intended agent from context
+        intended_agent_name = handoff.context.get("intended_agent")
+        if not intended_agent_name:
+            print("⚠️ No intended agent found in coordinator mode handoff")
+            yield "\n\nI need to route your request to the appropriate specialist. Let me help you with that."
+            return
+            
+        try:
+            intended_agent_type = AgentType(intended_agent_name)
+        except ValueError:
+            print(f"⚠️ Unknown intended agent: {intended_agent_name}")
+            yield f"\n\nI'm sorry, I couldn't route your request to the {intended_agent_name} specialist."
+            return
+            
+        if intended_agent_type not in self.agents:
+            yield f"\n\nI'm sorry, the {intended_agent_name} specialist is not available right now."
+            return
+            
+        print(f"🔄 Coordinator routing to intended agent: {intended_agent_name}")
+        self.current_agent = intended_agent_type
+        
+        # Update context for the intended agent
+        self.conversation_context.update(handoff.context)
+        self.conversation_context["conversation_history"] = self.conversation_history.copy()
+        
+        # Process with intended agent
+        target_agent = self.agents[intended_agent_type]
+        target_response_parts = []
+        for chunk in target_agent.process_message(handoff.user_message, self.conversation_context):
+            target_response_parts.append(chunk)
+            yield chunk
+        
+        # Add target agent's response to coordinator conversation history
+        if target_response_parts:
+            target_full_response = "".join(target_response_parts).strip()
+            if target_full_response:
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "agent": intended_agent_type.value,
+                    "content": target_full_response,
+                    "timestamp": time.time()
+                })
+    
     def _process_handoff_chain(self, original_message: str, max_handoffs: int = 3) -> Iterator[str]:
         """Process a chain of handoffs to handle cases where agents hand off to each other"""
         handoff_count = 0

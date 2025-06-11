@@ -9,7 +9,7 @@ Now uses OpenAI Chat Completions API with streaming instead of Assistants API.
 import json
 import time
 from typing import Dict, Any, Optional, Iterator, List
-from agent_coordinator import BaseAgent, AgentType, HandoffRequest
+from agent_coordinator import BaseAgent, AgentType, HandoffRequest, CoordinationMode
 from openai import OpenAI
 from mock_services import MockPBMServices
 from pricing_calculator import MathCalculator
@@ -25,10 +25,10 @@ class PricingAgent(BaseAgent):
         # Set agent-specific properties
         self.agent_name = "Pricing"
         self.agent_emoji = "💰"
-        
-        # Initialize tools and system prompt
+          # Initialize tools and system prompt
         self.system_prompt = self.get_system_prompt()
         self.tools = self.get_tools()
+    
     def get_system_prompt(self) -> str:
         """Get the system prompt for the pricing agent"""
         # Base pricing agent prompt
@@ -45,7 +45,8 @@ You do not need to ask about insurance or member ID, as the pricing system will 
 """
         # Shared context awareness and handoff rules
         context_awareness = get_shared_context_awareness()
-        handoff_rules = get_shared_handoff_rules(AgentType.PRICING)
+        handoff_rules = get_shared_handoff_rules(AgentType.PRICING, self.coordination_mode)
+        
         # Pricing-specific clarification rules
         clarification_rules = """
 CLARIFICATION RULES:
@@ -55,9 +56,10 @@ CLARIFICATION RULES:
 - Always hand off to Pharmacy agent for prescription status or refill requests.
 """
         return base_prompt + context_awareness + handoff_rules + clarification_rules
+    
     def get_tools(self) -> List[Dict[str, Any]]:
         """Get the tools configuration for the pricing agent"""
-        return [
+        tools = [
             # Core PBM Functions
             {
                 "type": "function",
@@ -214,29 +216,11 @@ CLARIFICATION RULES:
                         "required": ["value", "maximum"]
                     }
                 }
-            },
-            # Handoff function
-            {
-                "type": "function",
-                "function": {
-                    "name": "request_handoff",
-                    "description": "Hand off to another specialized agent",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "agent_type": {
-                                "type": "string",
-                                "enum": ["authentication", "pharmacy", "benefits", "clinical"],
-                                "description": "Which agent to hand off to"
-                            },
-                            "reason": {"type": "string", "description": "Why handoff is needed"},
-                            "context_summary": {"type": "string", "description": "Context for receiving agent"}
-                        },
-                        "required": ["agent_type", "reason", "context_summary"]
-                    }
-                }
-            }
-        ]
+            }        ]
+        
+        # Add handoff function from base class
+        tools.append(self.get_handoff_tool())
+        return tools
     def handle_tool_call(self, function_name: str, function_args: Dict[str, Any]) -> str:
         """Handle tool calls with console output"""
         try:

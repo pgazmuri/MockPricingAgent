@@ -31,7 +31,7 @@ from openai import OpenAI
 import keys
 
 # Import all agents
-from agent_coordinator import MultiAgentCoordinator, AgentType
+from agent_coordinator import MultiAgentCoordinator, AgentType, CoordinationMode
 from auth_agent import AuthenticationAgent
 from pricing_agent import PricingAgent
 from pharmacy_agent import PharmacyAgent
@@ -42,10 +42,10 @@ from clinical_agent import ClinicalAgent
 class MultiAgentHealthcareApp:
     """Main application for multi-agent healthcare assistance"""
     
-    def __init__(self):
+    def __init__(self, coordination_mode: CoordinationMode = CoordinationMode.SWARM):
         self.console = Console()
         self.client = OpenAI(api_key=keys.OPENAI_API_KEY)
-        self.coordinator = MultiAgentCoordinator()
+        self.coordinator = MultiAgentCoordinator(coordination_mode=coordination_mode)
         self.setup_agents()
         
     def setup_agents(self):
@@ -66,11 +66,13 @@ class MultiAgentHealthcareApp:
             self.console.print(f"✅ {name} initialized")
         
         self.console.print("\n🎛️ Multi-Agent Coordinator ready!", style="bold green")
+        
     def display_welcome(self):
         """Display welcome message and available services"""
         welcome_text = Text()
         welcome_text.append("🏥 Healthcare Multi-Agent Assistant\n", style="bold blue")
-        welcome_text.append("Intelligent healthcare services with specialized experts\n\n")
+        welcome_text.append("Intelligent healthcare services with specialized experts\n")
+        welcome_text.append(f"Mode: {self.coordinator.get_coordination_mode().value.upper()}\n\n", style="bold magenta")
         
         # Create services table
         table = Table(title="Available Services", show_header=True, header_style="bold magenta")
@@ -95,8 +97,15 @@ class MultiAgentHealthcareApp:
             border_style="blue"
         )
         self.console.print(panel)
-        self.console.print("\n💡 The system will automatically route your questions to the right specialist!", style="dim")
-        self.console.print("🔄 Agents can hand off to each other when you need different services.\n", style="dim")
+        
+        mode = self.coordinator.get_coordination_mode()
+        if mode == CoordinationMode.COORDINATOR:
+            self.console.print("🎛️ COORDINATOR MODE: Agents always route back to coordinator for decision making", style="dim")
+        else:
+            self.console.print("🔗 SWARM MODE: Agents can hand off directly to each other when needed", style="dim")
+        
+        self.console.print("💡 The system will automatically route your questions to the right specialist!", style="dim")
+        self.console.print("🔄 Try asking follow-up questions to see how agents work together.\n", style="dim")
     
     def display_conversation_state(self):
         """Display current conversation state and agent status"""
@@ -118,12 +127,33 @@ class MultiAgentHealthcareApp:
         
         panel = Panel(
             state_table,
-            title="📊 Conversation State",
-            border_style="dim",
+            title="📊 Conversation State",            border_style="dim",
             width=50
         )
         
         return panel
+    def switch_coordination_mode(self):
+        """Switch between coordinator and swarm modes and reset conversation"""
+        current_mode = self.coordinator.get_coordination_mode()
+        new_mode = CoordinationMode.COORDINATOR if current_mode == CoordinationMode.SWARM else CoordinationMode.SWARM
+        
+        self.console.print(f"\n🔄 Switching from {current_mode.value.upper()} to {new_mode.value.upper()} mode...", style="bold yellow")
+        
+        # Set the new coordination mode
+        self.coordinator.set_coordination_mode(new_mode)
+        
+        # Update system prompts and tools for all agents
+        for agent in self.coordinator.agents.values():
+            agent.system_prompt = agent.get_system_prompt()
+            agent.tools = agent.get_tools()
+        
+        # Reset conversation state for clean start in new mode
+        self.coordinator.reset_conversation()
+        
+        self.console.print(f"✅ Successfully switched to {new_mode.value.upper()} mode!", style="bold green")
+        self.console.print("💫 Conversation state has been reset for the new coordination mode.", style="dim")
+        self.display_welcome()
+        
     def run_demo_scenarios(self):
         """Run several demo scenarios to show agent handoffs"""
         self.console.print("\n🎭 Running Demo Scenarios", style="bold yellow")
@@ -191,11 +221,12 @@ class MultiAgentHealthcareApp:
                 time.sleep(1)  # Brief pause between messages
         
         self.console.print("\n✨ Demo scenarios complete! Now try your own questions.", style="bold green")
+        
     def run_interactive_session(self):
         """Run interactive chat session"""
         self.console.print("\n💬 Interactive Chat Session", style="bold blue")
         self.console.print("Type your questions and see the agents work together!")
-        self.console.print("Commands: 'help', 'status', 'demo', 'quit'\n")
+        self.console.print("Commands: 'help', 'status', 'demo', 'mode', 'quit'\n")
         
         while True:
             try:
@@ -216,6 +247,9 @@ class MultiAgentHealthcareApp:
                     continue
                 elif user_input.lower() == 'demo':
                     self.run_demo_scenarios()
+                    continue
+                elif user_input.lower() == 'mode':
+                    self.switch_coordination_mode()
                     continue
                   # Process with coordinator
                 with Live("🤔 Processing your request...", console=self.console) as live:
