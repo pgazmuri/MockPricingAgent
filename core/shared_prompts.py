@@ -1,4 +1,4 @@
-from agent_coordinator import AgentType, CoordinationMode
+from .agent_coordinator import AgentType, CoordinationMode
 
 
 def get_shared_context_awareness() -> str:

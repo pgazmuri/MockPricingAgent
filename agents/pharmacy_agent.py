@@ -8,9 +8,9 @@ Can hand off to other agents when needed (e.g., pricing, authentication, clinica
 import json
 import time
 from typing import Dict, Any, Optional, List
-from agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
+from core.agent_coordinator import BaseAgent, AgentType, AgentResponse, HandoffRequest
 from openai import OpenAI
-from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
+from core.shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 
 class PharmacyAgent(BaseAgent):

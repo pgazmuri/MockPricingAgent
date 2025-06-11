@@ -28,15 +28,15 @@ from rich.layout import Layout
 from rich.columns import Columns
 
 from openai import OpenAI
-import keys
+import config.keys as keys
 
 # Import all agents
-from agent_coordinator import MultiAgentCoordinator, AgentType, CoordinationMode
-from auth_agent import AuthenticationAgent
-from pricing_agent import PricingAgent
-from pharmacy_agent import PharmacyAgent
-from benefits_agent import BenefitsAgent
-from clinical_agent import ClinicalAgent
+from core.agent_coordinator import MultiAgentCoordinator, AgentType, CoordinationMode
+from agents.auth_agent import AuthenticationAgent
+from agents.pricing_agent import PricingAgent
+from agents.pharmacy_agent import PharmacyAgent
+from agents.benefits_agent import BenefitsAgent
+from agents.clinical_agent import ClinicalAgent
 
 
 class MultiAgentHealthcareApp:

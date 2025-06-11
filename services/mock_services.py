@@ -3,7 +3,7 @@ import random
 from typing import List, Dict, Any
 from decimal import Decimal
 from openai import OpenAI
-from models import (
+from core.models import (
     NDCLookupResponse, NDCLookupResult, SearchMode,
     RxPriceResponse, RxPriceResult, FormularyAlternativesResponse,
     # Legacy models for backwards compatibility
@@ -11,7 +11,7 @@ from models import (
     PlanBenefitStructure, MemberUtilization, FormularyResult,
     DrugCost, CouponResult, Coupon, PricingCalculation
 )
-import keys
+import config.keys as keys
 
 class MockPBMServices:
     """Simplified mock PBM services with only the three core functions"""

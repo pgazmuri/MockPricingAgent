@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional, Iterator, Generator
 from enum import Enum
 from openai import OpenAI
 from dataclasses import dataclass
-import keys
+import config.keys as keys
 
 class AgentType(Enum):
     """Types of specialized agents"""

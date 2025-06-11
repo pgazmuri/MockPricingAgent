@@ -9,11 +9,11 @@ Now uses OpenAI Chat Completions API with streaming instead of Assistants API.
 import json
 import time
 from typing import Dict, Any, Optional, Iterator, List
-from agent_coordinator import BaseAgent, AgentType, HandoffRequest, CoordinationMode
+from core.agent_coordinator import BaseAgent, AgentType, HandoffRequest, CoordinationMode
 from openai import OpenAI
-from mock_services import MockPBMServices
-from pricing_calculator import MathCalculator
-from shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
+from services.mock_services import MockPBMServices
+from services.pricing_calculator import MathCalculator
+from core.shared_prompts import get_shared_context_awareness, get_shared_handoff_rules
 
 class PricingAgent(BaseAgent):
     """Specialized agent for drug pricing and cost calculations"""    
@@ -226,7 +226,7 @@ CLARIFICATION RULES:
         try:
             # Core PBM Functions
             if function_name == "ndcLookup":
-                from models import SearchMode
+                from core.models import SearchMode
                 query = function_args["query"]
                 mode = SearchMode(function_args.get("mode", "search"))
                 
