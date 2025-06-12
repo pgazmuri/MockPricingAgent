@@ -13,16 +13,15 @@ from typing import List, Dict, Any, Optional, Iterator, Generator
 from enum import Enum
 from openai import OpenAI
 from dataclasses import dataclass
+from core.console_utils import display_tool_result
 import config.keys as keys
 
 class AgentType(Enum):
     """Types of specialized agents"""
     COORDINATOR = "coordinator"
-    PRICING = "pricing"
-    AUTHENTICATION = "authentication"
-    PHARMACY = "pharmacy"
-    BENEFITS = "benefits"
-    CLINICAL = "clinical"
+    INVESTIGATOR = "investigator"
+    ANALYSIS = "analysis"
+    REMEDIATION = "remediation"
 
 class CoordinationMode(Enum):
     """Coordination modes for multi-agent system"""
@@ -132,18 +131,22 @@ class BaseAgent:
             }
         else:
             # In swarm mode, agents can handoff directly to other agents
+            # Build enum excluding current agent to prevent self-handoffs
+            all_agents = ["investigator", "analysis", "remediation"]
+            available_agents = [agent for agent in all_agents if agent != self.agent_type.value]
+            
             return {
                 "type": "function",
                 "function": {
                     "name": "request_handoff",
-                    "description": "Hand off to another specialized agent",
+                    "description": "Hand off to another specialized agent",                    
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "agent_type": {
                                 "type": "string",
-                                "enum": ["authentication", "pharmacy", "benefits", "clinical", "pricing"],
-                                "description": "Which agent to hand off to"
+                                "enum": available_agents,
+                                "description": f"Which agent to hand off to (excluding {self.agent_type.value})"
                             },
                             "reason": {"type": "string", "description": "Why handoff is needed"},
                             "context_summary": {"type": "string", "description": "Context for receiving agent"}
@@ -214,12 +217,13 @@ class BaseAgent:
                                 reason=reason,
                                 context_summary=context_summary,
                                 user_message=message
-                            )
-                            # Handoff happens silently - no message yielded, break from loop
+                            )                            # Handoff happens silently - no message yielded, break from loop
                             return
                         else:
                             if hasattr(self, 'handle_tool_call'):
                                 result = self.handle_tool_call(fn_name, fn_args)
+                                # Display tool result in bounded box
+                                display_tool_result(fn_name, fn_args, result, agent_name, getattr(self, 'agent_emoji', '🔧'))
                             else:
                                 result = json.dumps({"error": f"No handler for function {fn_name}"})
                             # 3️⃣ feed the result back
@@ -352,25 +356,22 @@ class MultiAgentCoordinator:
         self.coordinator_tools = self._create_coordinator_tools()
         self.coordinator_system_prompt = self._create_coordinator_system_prompt()
         
-        print(f"🎛️ Coordinator initialized in {coordination_mode.value.upper()} mode")    
+        print(f"🎛️ Coordinator initialized in {coordination_mode.value.upper()} mode")
+        
     def _create_coordinator_system_prompt(self) -> str:
         """Create the coordinator system prompt based on coordination mode"""
         base_prompt = """
-You are a smart coordinator for a healthcare/pharmacy system with multiple specialized agents.
+You are a smart coordinator for an IT Operations system with specialized agents.
 
 AVAILABLE AGENTS:
-- PRICING: Drug cost calculations, insurance benefits, pricing estimates
-- AUTHENTICATION: Member verification, login, security checks  
-- PHARMACY: Prescription status, refills, transfers, pickup notifications
-- BENEFITS: Plan details, coverage rules, prior authorizations
-- CLINICAL: Drug interactions, alternatives, clinical criteria
+- INVESTIGATOR: Server outage investigation, log analysis, system diagnostics, troubleshooting
+- ANALYSIS: Analyze investigation findings and recommend next steps or remediation plans
+- REMEDIATION: Execute approved remediation plans and fixes
 
 HANDOFF RULES:
-- For prescription refills, status, transfers, pickup → hand off to PHARMACY
-- For authentication, login, verification → hand off to AUTHENTICATION  
-- For drug costs, pricing, insurance → hand off to PRICING
-- For plan details, coverage → hand off to BENEFITS
-- For drug interactions, alternatives → hand off to CLINICAL
+- For server issues, outages, log analysis, troubleshooting → hand off to INVESTIGATOR
+- For analyzing findings and planning next steps → hand off to ANALYSIS
+- For executing approved fixes and remediation → hand off to REMEDIATION
 """
         
         if self.coordination_mode == CoordinationMode.COORDINATOR:
@@ -400,14 +401,13 @@ IMPORTANT: Never respond to the user directly. Always use request_handoff functi
             {
                 "type": "function",
                 "function": {
-                    "name": "request_handoff",
-                    "description": "Hand off conversation to a specialized agent",
+                    "name": "request_handoff",                    "description": "Hand off conversation to a specialized agent",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "agent_type": {
                                 "type": "string",
-                                "enum": ["pricing", "authentication", "pharmacy", "benefits", "clinical"],
+                                "enum": ["investigator", "analysis", "remediation"],
                                 "description": "Which agent to hand off to"
                             },
                             "reason": {

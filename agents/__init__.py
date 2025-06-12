@@ -1,20 +1,18 @@
 """
-Agent implementations for the Multi-Agent Healthcare System.
+Agent implementations for the Multi-Agent IT Operations System.
 
 This package contains all specialized agent implementations that handle
-different aspects of healthcare assistance.
+different aspects of IT operations assistance.
 """
 
 from .auth_agent import AuthenticationAgent
-from .benefits_agent import BenefitsAgent
-from .clinical_agent import ClinicalAgent
-from .pharmacy_agent import PharmacyAgent
-from .pricing_agent import PricingAgent
+from .investigator_agent import InvestigatorAgent
+from .analysis_agent import AnalysisAgent
+from .remediation_agent import RemediationAgent
 
 __all__ = [
     'AuthenticationAgent',
-    'BenefitsAgent', 
-    'ClinicalAgent',
-    'PharmacyAgent',
-    'PricingAgent'
+    'InvestigatorAgent',
+    'AnalysisAgent',
+    'RemediationAgent'
 ]
